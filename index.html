@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PassCode | Ephemeral P2P AirDrop & Text Bridge</title>
+    <meta name="description" content="Peer-to-peer file and text sharing over WebRTC. No servers, no storage, complete privacy.">
+
+    <!-- Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+
+    <!-- PeerJS -->
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+
+    <!-- QRCode.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+
+    <!-- FontAwesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+
+    <!-- Custom Styles -->
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+    <!-- Toast Container -->
+    <div id="toastContainer"></div>
+
+    <!-- QR Code Modal -->
+    <div id="qrModal">
+        <div id="qrModalContent">
+            <button onclick="closeQrModal()" class="btn-icon" style="position:absolute;top:1rem;right:1rem;background:var(--slate-800);color:var(--slate-400);border-radius:9999px;">
+                <i class="fa-solid fa-xmark"></i>
+            </button>
+            <h3 style="font-size:1.125rem;font-weight:600;color:var(--white);margin-bottom:0.25rem">Scan to Connect</h3>
+            <p style="font-size:0.75rem;color:var(--slate-400);margin-bottom:1.5rem">Point any phone camera at this QR code to instantly join this P2P room.</p>
+            <div style="background:var(--white);padding:1rem;border-radius:0.75rem;display:inline-block;box-shadow:inset 0 2px 4px 0 rgba(0,0,0,0.05);margin-bottom:1rem" id="qrcode"></div>
+            <div style="background:rgba(2,6,23,0.8);border-radius:0.5rem;padding:0.625rem;border:1px solid rgba(30,41,59,0.8);display:flex;align-items:center;justify-content:space-between;gap:0.5rem;font-size:0.75rem;font-family:var(--font-mono);color:var(--slate-300)">
+                <span class="truncate" id="shareUrlText">Loading...</span>
+                <button onclick="copyShareUrl(this)" class="btn-ghost" style="flex-shrink:0;display:flex;align-items:center;gap:0.375rem">
+                    <i class="fa-regular fa-copy"></i> Copy
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Header -->
+    <header>
+        <div class="header-inner">
+            <div class="brand">
+                <div class="brand-icon">
+                    <i class="fa-solid fa-bolt-lightning"></i>
+                </div>
+                <div>
+                    <span class="brand-name">PassCode</span>
+                    <span class="brand-badge">WebRTC P2P</span>
+                </div>
+            </div>
+            <div style="display:flex;align-items:center;gap:0.75rem">
+                <div id="statusPill" class="status-pill disconnected">
+                    <span id="statusDot" class="status-dot disconnected"></span>
+                    <span id="statusText">Disconnected</span>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main>
+
+        <!-- Connection Hub -->
+        <section class="connection-hub">
+
+            <!-- My Room Code Card -->
+            <div class="my-code-card">
+                <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:1rem">
+                    <div>
+                        <span class="code-label">Your Room Code</span>
+                        <p class="code-sublabel">Share this 4-digit code or QR with your other device</p>
+                    </div>
+                    <button onclick="openQrModal()" class="btn-ghost" style="display:flex;align-items:center;gap:0.5rem">
+                        <i class="fa-solid fa-qrcode" style="color:var(--emerald-400)"></i> QR Code
+                    </button>
+                </div>
+                <div class="code-display">
+                    <div class="code-value-group">
+                        <div class="code-bar"></div>
+                        <span id="myRoomCode">----</span>
+                    </div>
+                    <button onclick="copyRoomCode(this)" class="btn-icon btn-icon-copy" title="Copy 4-Digit Code">
+                        <i class="fa-regular fa-copy" style="font-size:0.875rem"></i>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Join Room Card -->
+            <div class="card" style="display:flex;flex-direction:column;justify-content:space-between">
+                <div class="join-card-header">
+                    <span class="join-card-title">Connect to Peer</span>
+                    <p class="join-card-subtitle">Enter a 4-digit code from another device to establish direct P2P link</p>
+                </div>
+                <form id="joinForm" onsubmit="handleJoin(event)" class="join-form">
+                    <div class="join-input-wrap">
+                        <div class="join-input-icon">
+                            <i class="fa-solid fa-link"></i>
+                        </div>
+                        <input
+                            type="text"
+                            id="joinCodeInput"
+                            maxlength="4"
+                            placeholder="Enter 4-digit code (e.g. 4829)"
+                            autocomplete="off"
+                        >
+                    </div>
+                    <button type="submit" id="connectBtn" class="btn btn-primary">
+                        <i class="fa-solid fa-plug" style="font-size:0.75rem"></i> Connect
+                    </button>
+                </form>
+            </div>
+        </section>
+
+        <!-- Split-Panel Workspace -->
+        <section class="workspace">
+
+            <!-- Left Panel: Sharing Canvas -->
+            <div class="workspace-left">
+
+                <!-- File Dropzone -->
+                <div class="card">
+                    <h2 class="section-title">
+                        <span class="section-title-left">
+                            <i class="fa-solid fa-file-arrow-up" style="color:var(--emerald-400)"></i> Send File
+                        </span>
+                        <span class="section-subtitle">No file size limits</span>
+                    </h2>
+
+                    <div
+                        id="dropzone"
+                        onclick="document.getElementById('fileInput').click()"
+                        class="dropzone"
+                    >
+                        <input type="file" id="fileInput" class="hidden" onchange="handleFileSelect(event)">
+
+                        <div id="dropzonePrompt">
+                            <div class="dropzone-icon">
+                                <i class="fa-solid fa-cloud-arrow-up"></i>
+                            </div>
+                            <p class="dropzone-text">Click to browse or drag & drop</p>
+                            <p class="dropzone-hint">Any file type &bull; Direct browser-to-browser stream</p>
+                        </div>
+
+                        <!-- Selected File State -->
+                        <div id="selectedFileState" class="selected-file-state hidden">
+                            <div class="selected-file-row">
+                                <div class="selected-file-info">
+                                    <div class="file-icon-box emerald">
+                                        <i class="fa-solid fa-file" id="selectedFileIcon"></i>
+                                    </div>
+                                    <div class="file-details">
+                                        <p class="file-name" id="selectedFileName">filename.ext</p>
+                                        <p class="file-size" id="selectedFileSize">0 KB</p>
+                                    </div>
+                                </div>
+                                <button type="button" onclick="clearSelectedFile(event)" class="btn-clear-file">
+                                    <i class="fa-solid fa-xmark"></i>
+                                </button>
+                            </div>
+                            <button type="button" id="sendFileBtn" onclick="sendSelectedFile(event)" class="btn-send-file">
+                                <i class="fa-solid fa-paper-plane"></i> Stream File Now
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Live Text / URL Pad -->
+                <div class="card">
+                    <h2 class="section-title">
+                        <span class="section-title-left">
+                            <i class="fa-solid fa-comment-dots" style="color:var(--indigo-400)"></i> Quick Text & URL Bridge
+                        </span>
+                        <span class="section-subtitle">Instant clipboard</span>
+                    </h2>
+
+                    <div>
+                        <textarea
+                            id="textInput"
+                            rows="4"
+                            placeholder="Paste URLs, code snippets, secrets, or notes here..."
+                            class="text-input"
+                            onkeydown="handleTextKeydown(event)"
+                        ></textarea>
+                        <div class="text-input-footer">
+                            <span class="text-input-hint">Press Ctrl+Enter / &#8984;+Enter to send</span>
+                            <button type="button" onclick="sendText()" class="btn-send">
+                                <i class="fa-solid fa-share" style="font-weight:700"></i> Send Text
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Panel: Incoming Feed -->
+            <div class="feed-panel" style="position:relative">
+                <div class="feed-header">
+                    <div class="feed-header-left">
+                        <div class="feed-dot"></div>
+                        <h2 style="font-size:0.875rem;font-weight:600;color:var(--slate-200)">Live Incoming Feed</h2>
+                        <span id="feedCount" class="feed-count">0</span>
+                    </div>
+                    <button onclick="clearFeed()" class="btn-clear">
+                        <i class="fa-regular fa-trash-can"></i> Clear Feed
+                    </button>
+                </div>
+
+                <!-- Feed Container -->
+                <div id="feedContainer">
+                    <!-- Empty State -->
+                    <div id="emptyState" class="empty-state">
+                        <div class="empty-state-icon">
+                            <i class="fa-solid fa-satellite-dish"></i>
+                        </div>
+                        <h3 class="empty-state-title">Waiting for incoming drops...</h3>
+                        <p class="empty-state-desc">Connect a peer device using the 4-digit code above. Anything they send will appear here instantly.</p>
+                    </div>
+                </div>
+
+                <!-- Retry Overlay -->
+                <div id="retryOverlay" class="retry-overlay">
+                    <div class="retry-icon"><i class="fa-solid fa-rotate-right"></i></div>
+                    <p class="retry-text">Connection failed or peer disconnected. Enter the peer's code and try again.</p>
+                    <button onclick="handleRetry()" class="btn-retry">
+                        <i class="fa-solid fa-plug"></i> Reconnect
+                    </button>
+                </div>
+            </div>
+
+        </section>
+
+    </main>
+
+    <!-- Footer -->
+    <footer>
+        <p>PassCode runs 100% locally in your browser. Zero servers, zero storage, complete privacy.</p>
+    </footer>
+
+    <!-- Application Script -->
+    <script src="app.js"></script>
+</body>
+</html>

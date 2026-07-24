@@ -1,0 +1,24 @@
+{
+  "name": "passcode",
+  "version": "1.0.0",
+  "description": "Ephemeral peer-to-peer file and text sharing over WebRTC. No servers, no storage, complete privacy.",
+  "main": "index.html",
+  "scripts": {
+    "start": "npx serve .",
+    "dev": "npx live-server --port=3000"
+  },
+  "keywords": [
+    "webrtc",
+    "p2p",
+    "file-transfer",
+    "peerjs",
+    "airdrop",
+    "privacy"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": ""
+  }
+}
