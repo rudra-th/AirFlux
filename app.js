@@ -3,10 +3,12 @@
 // ============================================
 
 // --- STATE & CONFIG ---
-const CHUNK_SIZE = 64 * 1024;
+const CHUNK_SIZE = 256 * 1024;
 const PEER_PREFIX = 'passcode-airdrop-v1-';
 const MAX_PEER_RETRIES = 10;
 const CONNECTION_TIMEOUT_MS = 15000;
+const YIELD_INTERVAL = 16;
+const YIELD_MS = 1;
 
 let peer = null;
 let conn = null;
@@ -210,7 +212,11 @@ function handleIncomingData(data) {
             fileType: data.fileType,
             totalChunks: data.totalChunks,
             receivedChunks: 0,
-            buffers: new Array(data.totalChunks)
+            receivedBytes: 0,
+            buffers: new Array(data.totalChunks),
+            startTime: performance.now(),
+            lastSpeedUpdate: performance.now(),
+            lastBytesAtSpeedUpdate: 0
         };
         addIncomingFileCard(data.fileId, data.name, data.size);
         playNotificationPulse();
@@ -219,8 +225,19 @@ function handleIncomingData(data) {
         if (fileObj) {
             fileObj.buffers[data.chunkIndex] = data.data;
             fileObj.receivedChunks++;
+            fileObj.receivedBytes += data.data.byteLength;
+            const now = performance.now();
+            let speed = 0;
+            if (now - fileObj.lastSpeedUpdate > 500) {
+                speed = (fileObj.receivedBytes - fileObj.lastBytesAtSpeedUpdate) / ((now - fileObj.lastSpeedUpdate) / 1000);
+                fileObj.lastSpeedUpdate = now;
+                fileObj.lastBytesAtSpeedUpdate = fileObj.receivedBytes;
+            } else {
+                const elapsed = now - fileObj.startTime;
+                speed = elapsed > 0 ? fileObj.receivedBytes / (elapsed / 1000) : 0;
+            }
             const percent = Math.round((fileObj.receivedChunks / fileObj.totalChunks) * 100);
-            updateFileCardProgress(data.fileId, percent);
+            updateFileCardProgress(data.fileId, percent, speed);
         }
     } else if (data.type === 'file-end') {
         const fileObj = incomingFiles[data.fileId];
@@ -270,8 +287,16 @@ async function sendFileOverWebRTC(file) {
 
     addOutgoingFileCard(fileId, file.name, file.size);
 
+    const hasher = await crypto.subtle.digest('SHA-256', new ArrayBuffer(0)).then(() => {
+        return crypto.subtle.importKey('raw', new Uint8Array(0), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']).catch(() => null);
+    });
+
     let offset = 0;
     let chunkIndex = 0;
+    let bytesSent = 0;
+    const startTime = performance.now();
+    let lastSpeedUpdate = startTime;
+    let lastBytesAtSpeedUpdate = 0;
 
     while (offset < file.size) {
         const slice = file.slice(offset, offset + CHUNK_SIZE);
@@ -286,10 +311,23 @@ async function sendFileOverWebRTC(file) {
 
         offset += CHUNK_SIZE;
         chunkIndex++;
-        updateFileCardProgress(fileId, Math.round((chunkIndex / totalChunks) * 100));
+        bytesSent += buffer.byteLength;
 
-        if (chunkIndex % 4 === 0) {
-            await new Promise(r => setTimeout(r, 5));
+        const now = performance.now();
+        const elapsed = now - startTime;
+        const percent = Math.round((chunkIndex / totalChunks) * 100);
+        let speed = 0;
+        if (now - lastSpeedUpdate > 500) {
+            speed = ((bytesSent - lastBytesAtSpeedUpdate) / ((now - lastSpeedUpdate) / 1000));
+            lastSpeedUpdate = now;
+            lastBytesAtSpeedUpdate = bytesSent;
+        } else if (elapsed > 0) {
+            speed = bytesSent / (elapsed / 1000);
+        }
+        updateFileCardProgress(fileId, percent, speed);
+
+        if (chunkIndex % YIELD_INTERVAL === 0) {
+            await new Promise(r => setTimeout(r, YIELD_MS));
         }
     }
 
@@ -299,9 +337,11 @@ async function sendFileOverWebRTC(file) {
         conn.send({ type: 'file-hash', fileId: fileId, hash: hash });
     });
 
-    updateFileCardProgress(fileId, 100);
-    finishOutgoingFileCard(fileId);
-    showToast(`Sent: ${file.name}`, 'success');
+    const totalTime = ((performance.now() - startTime) / 1000).toFixed(1);
+    const avgSpeed = file.size / ((performance.now() - startTime) / 1000);
+    updateFileCardProgress(fileId, 100, avgSpeed);
+    finishOutgoingFileCard(fileId, totalTime, avgSpeed);
+    showToast(`Sent: ${file.name} (${totalTime}s avg ${formatBytes(Math.round(avgSpeed))}/s)`, 'success');
 }
 
 function sendText() {
@@ -459,13 +499,16 @@ function addOutgoingFileCard(fileId, name, size) {
     feedContainer.insertBefore(card, feedContainer.firstChild);
 }
 
-function updateFileCardProgress(fileId, percent) {
+function updateFileCardProgress(fileId, percent, speed) {
     const card = $(`file-card-${fileId}`);
     if (!card) return;
     const bar = card.querySelector('.progress-bar');
     const text = card.querySelector('.progress-text');
     if (bar) bar.style.width = `${percent}%`;
-    if (text) text.textContent = `Transferring... ${percent}%`;
+    if (text) {
+        const speedStr = speed > 0 ? ` at ${formatBytes(Math.round(speed))}/s` : '';
+        text.textContent = `Transferring... ${percent}%${speedStr}`;
+    }
 }
 
 function finishFileCard(fileId, downloadUrl, name, size, verificationStatus) {
@@ -569,11 +612,14 @@ async function streamToDisk(fileId) {
     }
 }
 
-function finishOutgoingFileCard(fileId) {
+function finishOutgoingFileCard(fileId, totalTime, avgSpeed) {
     const card = $(`file-card-${fileId}`);
     if (!card) return;
     const text = card.querySelector('.progress-text');
-    if (text) text.textContent = 'Successfully delivered to peer!';
+    if (text) {
+        const speedStr = avgSpeed > 0 ? ` avg ${formatBytes(Math.round(avgSpeed))}/s` : '';
+        text.textContent = `Delivered to peer in ${totalTime}s${speedStr}`;
+    }
 }
 
 function clearFeed() {
