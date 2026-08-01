@@ -794,7 +794,7 @@ function addOutgoingTextCard(content, timestamp) {
     syncFeedMeta();
 
     const card = document.createElement('div');
-    card.className = 'feed-card sent';
+    card.className = 'feed-card outgoing-text';
     card.innerHTML = `
         <div class="card-header">
             <span class="badge badge-dim">
@@ -886,9 +886,9 @@ function updateFileCardProgress(fileId, percent, speed, remaining) {
     if (!c) {
         const card = id(`file-card-${fileId}`);
         if (!card) return;
-        const bar  = card.querySelector('.progress-bar');
+        const bar  = card.querySelector('.prog-bar');
         const text = card.querySelector('.file-card-progress');
-        const track = card.querySelector('.progress-track');
+        const track = card.querySelector('.prog-track');
         if (!bar || !text) return;
         fileDomCache[fileId] = c = { bar, text, track };
     }
@@ -919,8 +919,8 @@ function finishFileCard(fileId, downloadUrl, name, size, status) {
         if (status === 'mismatch') textEl.classList.add('error');
     }
 
-    const bar   = card.querySelector('.progress-bar');
-    const track = card.querySelector('.progress-track');
+    const bar   = card.querySelector('.prog-bar');
+    const track = card.querySelector('.prog-track');
     if (bar)   { bar.style.width = '100%'; bar.classList.replace('green','green-done'); }
     if (track) { track.setAttribute('aria-valuenow', 100); }
 
