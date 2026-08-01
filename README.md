@@ -1,4 +1,4 @@
-# PassCode
+# AirFlux
 
 Ephemeral peer-to-peer file and text sharing over WebRTC. No servers, no storage, complete privacy.
 

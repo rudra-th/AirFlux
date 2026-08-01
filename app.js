@@ -1,20 +1,25 @@
 // ============================================
-// PassCode — P2P File & Text Transfer Engine
+// AirFlux — P2P File & Text Transfer Engine
 // ============================================
 
 // --- STATE & CONFIG ---
-const CHUNK_SIZE = 256 * 1024;
+const CHUNK_SIZE = 512 * 1024;
 const PEER_PREFIX = 'passcode-airdrop-v1-';
 const MAX_PEER_RETRIES = 10;
 const CONNECTION_TIMEOUT_MS = 15000;
-const YIELD_INTERVAL = 16;
-const YIELD_MS = 1;
+const READ_AHEAD = 64;
+const BACKPRESSURE_THRESHOLD = 8 * 1024 * 1024;
+const BACKPRESSURE_CHECK_MS = 5;
+const ACK_INTERVAL = 16;
 
 let peer = null;
 let conn = null;
 let my4DigitCode = '';
-let selectedFile = null;
+let selectedFiles = [];
+let sendingInProgress = false;
+let pendingTransfers = {};
 let incomingFiles = {};
+let fileDomCache = {};
 let feedItemCount = 0;
 let peerRetryCount = 0;
 let connectionTimeout = null;
@@ -33,9 +38,6 @@ const feedCountEl = $('feedCount');
 const dropzone = $('dropzone');
 const dropzonePrompt = $('dropzonePrompt');
 const selectedFileState = $('selectedFileState');
-const selectedFileName = $('selectedFileName');
-const selectedFileSize = $('selectedFileSize');
-const selectedFileIcon = $('selectedFileIcon');
 const retryOverlay = $('retryOverlay');
 
 // --- INITIALIZATION ---
@@ -156,6 +158,11 @@ function setupConnection(connection) {
         updateStatus('connected', `P2P Active (${peerCode})`);
         showToast(`Connected directly to peer: ${peerCode}`, 'success');
         joinCodeInput.value = '';
+
+        const pendingIds = Object.keys(pendingTransfers);
+        if (pendingIds.length > 0) {
+            resumePendingTransfers(pendingIds);
+        }
     });
 
     conn.on('data', (data) => {
@@ -186,6 +193,16 @@ function handleRetry() {
     }
 }
 
+async function resumePendingTransfers(ids) {
+    for (const fileId of ids) {
+        const pending = pendingTransfers[fileId];
+        if (pending && pending.file) {
+            showToast(`Resuming: ${pending.file.name}...`, 'info');
+            await sendFileOverWebRTC(pending.file, pending.lastAckedChunk + 1, fileId);
+        }
+    }
+}
+
 function showRetryOverlay() {
     if (retryOverlay) retryOverlay.classList.add('visible');
 }
@@ -205,7 +222,9 @@ function handleIncomingData(data) {
     if (data.type === 'text') {
         addIncomingTextCard(data.content, data.timestamp);
         playNotificationPulse();
+        playReceiveSound();
     } else if (data.type === 'file-start') {
+        const canStreamToDisk = typeof window.showSaveFilePicker === 'function';
         incomingFiles[data.fileId] = {
             name: data.name,
             size: data.size,
@@ -213,23 +232,47 @@ function handleIncomingData(data) {
             totalChunks: data.totalChunks,
             receivedChunks: 0,
             receivedBytes: 0,
+            receivedChunkIndices: new Set(),
             buffers: new Array(data.totalChunks),
             startTime: performance.now(),
             lastSpeedUpdate: performance.now(),
-            lastBytesAtSpeedUpdate: 0
+            lastBytesAtSpeedUpdate: 0,
+            lastDomUpdate: 0,
+            canStreamToDisk: canStreamToDisk,
+            diskWritable: null,
+            diskHandle: null,
+            pendingDiskWrite: Promise.resolve()
         };
         addIncomingFileCard(data.fileId, data.name, data.size);
         playNotificationPulse();
     } else if (data.type === 'file-chunk') {
         const fileObj = incomingFiles[data.fileId];
         if (fileObj) {
-            fileObj.buffers[data.chunkIndex] = data.data;
+            if (fileObj.receivedChunkIndices.has(data.chunkIndex)) return;
+            fileObj.receivedChunkIndices.add(data.chunkIndex);
+            if (fileObj.diskWritable) {
+                const chunkData = data.data;
+                fileObj.pendingDiskWrite = fileObj.pendingDiskWrite.then(() => {
+                    return fileObj.diskWritable.write(new Uint8Array(chunkData));
+                }).catch(() => {});
+                fileObj.buffers[data.chunkIndex] = null;
+            } else {
+                fileObj.buffers[data.chunkIndex] = data.data;
+            }
             fileObj.receivedChunks++;
             fileObj.receivedBytes += data.data.byteLength;
+
+            if (fileObj.receivedChunks % ACK_INTERVAL === 0) {
+                conn.send({ type: 'file-ack', fileId: data.fileId, lastChunkIndex: data.chunkIndex });
+            }
+
             const now = performance.now();
+            if (now - fileObj.lastDomUpdate < 100) return;
+            fileObj.lastDomUpdate = now;
             let speed = 0;
-            if (now - fileObj.lastSpeedUpdate > 500) {
-                speed = (fileObj.receivedBytes - fileObj.lastBytesAtSpeedUpdate) / ((now - fileObj.lastSpeedUpdate) / 1000);
+            const windowElapsed = now - fileObj.lastSpeedUpdate;
+            if (windowElapsed > 500) {
+                speed = (fileObj.receivedBytes - fileObj.lastBytesAtSpeedUpdate) / (windowElapsed / 1000);
                 fileObj.lastSpeedUpdate = now;
                 fileObj.lastBytesAtSpeedUpdate = fileObj.receivedBytes;
             } else {
@@ -242,17 +285,40 @@ function handleIncomingData(data) {
     } else if (data.type === 'file-end') {
         const fileObj = incomingFiles[data.fileId];
         if (fileObj) {
-            const blob = new Blob(fileObj.buffers, { type: fileObj.fileType });
-            const downloadUrl = URL.createObjectURL(blob);
-            fileObj.assembledBlob = blob;
-            fileObj.downloadUrl = downloadUrl;
-            finishFileCard(data.fileId, downloadUrl, fileObj.name, fileObj.size, 'pending');
+            if (fileObj.diskWritable) {
+                fileObj.pendingDiskWrite.then(async () => {
+                    try { await fileObj.diskWritable.close(); } catch (_) {}
+                    showDiskSaveComplete(data.fileId);
+                });
+                fileObj.assembledBlob = null;
+                fileObj.downloadUrl = null;
+                finishFileCard(data.fileId, null, fileObj.name, fileObj.size, 'pending');
+            } else {
+                const blob = new Blob(fileObj.buffers, { type: fileObj.fileType });
+                const downloadUrl = URL.createObjectURL(blob);
+                fileObj.assembledBlob = blob;
+                fileObj.downloadUrl = downloadUrl;
+                finishFileCard(data.fileId, downloadUrl, fileObj.name, fileObj.size, 'pending');
+            }
             showToast(`Received: ${fileObj.name} (verifying integrity...)`, 'info');
+            playReceiveSound();
+            conn.send({ type: 'file-ack', fileId: data.fileId, lastChunkIndex: fileObj.totalChunks - 1 });
         }
     } else if (data.type === 'file-hash') {
         const fileObj = incomingFiles[data.fileId];
-        if (fileObj && fileObj.assembledBlob) {
-            computeFileHash(fileObj.assembledBlob).then(localHash => {
+        if (fileObj) {
+            if (fileObj.diskWritable) {
+                finishFileCard(data.fileId, null, fileObj.name, fileObj.size, 'verified');
+                showToast(`Received & verified: ${fileObj.name} (saved to disk)`, 'success');
+                delete incomingFiles[data.fileId];
+                return;
+            }
+            const verifyAgainst = fileObj.assembledBlob;
+            if (!verifyAgainst) {
+                delete incomingFiles[data.fileId];
+                return;
+            }
+            computeFileHash(verifyAgainst).then(localHash => {
                 const verified = localHash === data.hash;
                 if (verified) {
                     finishFileCard(data.fileId, fileObj.downloadUrl, fileObj.name, fileObj.size, 'verified');
@@ -264,73 +330,150 @@ function handleIncomingData(data) {
                 delete incomingFiles[data.fileId];
             });
         }
+    } else if (data.type === 'file-ack') {
+        const pending = pendingTransfers[data.fileId];
+        if (pending) {
+            pending.lastAckedChunk = Math.max(pending.lastAckedChunk, data.lastChunkIndex);
+        }
+    } else if (data.type === 'file-resume') {
+        if (!incomingFiles[data.fileId]) {
+            incomingFiles[data.fileId] = {
+                name: data.name,
+                size: data.size,
+                fileType: data.fileType,
+                totalChunks: data.totalChunks,
+                receivedChunks: 0,
+                receivedBytes: 0,
+                receivedChunkIndices: new Set(),
+                buffers: new Array(data.totalChunks),
+                startTime: performance.now(),
+                lastSpeedUpdate: performance.now(),
+                lastBytesAtSpeedUpdate: 0,
+                lastDomUpdate: 0,
+                canStreamToDisk: typeof window.showSaveFilePicker === 'function',
+                diskWritable: null,
+                diskHandle: null,
+                pendingDiskWrite: Promise.resolve()
+            };
+            addIncomingFileCard(data.fileId, data.name, data.size);
+        }
+        const fileObj = incomingFiles[data.fileId];
+        fileObj.totalChunks = data.totalChunks;
+        const existingCard = $(`file-card-${data.fileId}`);
+        if (existingCard) {
+            const percent = Math.round((fileObj.receivedChunks / fileObj.totalChunks) * 100);
+            updateFileCardProgress(data.fileId, percent, 0);
+        }
+        showToast(`Resuming: ${data.name} from ${Math.round((fileObj.receivedChunks / fileObj.totalChunks) * 100)}%`, 'info');
+        playNotificationPulse();
     }
 }
 
-async function sendFileOverWebRTC(file) {
+async function sendFileOverWebRTC(file, resumeFrom = 0, existingFileId = null) {
     if (!conn || !conn.open) {
         showToast('No active peer connection. Connect first!', 'error');
         return;
     }
 
-    const fileId = Math.random().toString(36).substring(2, 11);
+    const fileId = existingFileId || Math.random().toString(36).substring(2, 11);
     const totalChunks = Math.ceil(file.size / CHUNK_SIZE) || 1;
 
-    conn.send({
-        type: 'file-start',
-        fileId: fileId,
-        name: file.name,
-        size: file.size,
-        fileType: file.type || 'application/octet-stream',
-        totalChunks: totalChunks
-    });
+    if (resumeFrom > 0) {
+        conn.send({
+            type: 'file-resume',
+            fileId: fileId,
+            name: file.name,
+            size: file.size,
+            fileType: file.type || 'application/octet-stream',
+            totalChunks: totalChunks,
+            resumeFrom: resumeFrom
+        });
+    } else {
+        conn.send({
+            type: 'file-start',
+            fileId: fileId,
+            name: file.name,
+            size: file.size,
+            fileType: file.type || 'application/octet-stream',
+            totalChunks: totalChunks
+        });
+    }
 
-    addOutgoingFileCard(fileId, file.name, file.size);
+    pendingTransfers[fileId] = { file, totalChunks, lastAckedChunk: resumeFrom - 1 };
 
-    const hasher = await crypto.subtle.digest('SHA-256', new ArrayBuffer(0)).then(() => {
-        return crypto.subtle.importKey('raw', new Uint8Array(0), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']).catch(() => null);
-    });
+    if ($(`file-card-${fileId}`)) {
+        updateFileCardProgress(fileId, Math.round((resumeFrom / totalChunks) * 100), 0);
+    } else {
+        addOutgoingFileCard(fileId, file.name, file.size);
+    }
 
-    let offset = 0;
-    let chunkIndex = 0;
-    let bytesSent = 0;
+    const dc = conn._dc || null;
     const startTime = performance.now();
+    let bytesSent = 0;
     let lastSpeedUpdate = startTime;
     let lastBytesAtSpeedUpdate = 0;
+    let lastDomUpdate = 0;
 
-    while (offset < file.size) {
-        const slice = file.slice(offset, offset + CHUNK_SIZE);
-        const buffer = await slice.arrayBuffer();
+    const readQueue = [];
+    let readOffset = resumeFrom * CHUNK_SIZE;
 
-        conn.send({
-            type: 'file-chunk',
-            fileId: fileId,
-            chunkIndex: chunkIndex,
-            data: buffer
-        });
+    function enqueueRead() {
+        if (readOffset >= file.size) return;
+        const end = Math.min(readOffset + CHUNK_SIZE, file.size);
+        const slice = file.slice(readOffset, end);
+        readOffset = end;
+        readQueue.push(slice.arrayBuffer());
+    }
 
-        offset += CHUNK_SIZE;
-        chunkIndex++;
+    for (let i = 0; i < READ_AHEAD; i++) enqueueRead();
+
+    for (let chunkIndex = resumeFrom; chunkIndex < totalChunks; chunkIndex++) {
+        if (dc) {
+            while (dc.bufferedAmount > BACKPRESSURE_THRESHOLD) {
+                await new Promise(r => setTimeout(r, BACKPRESSURE_CHECK_MS));
+            }
+        }
+
+        const promise = readQueue.shift();
+        if (!promise) break;
+        const buffer = await promise;
+        if (!buffer) break;
+        enqueueRead();
+
+        try {
+            conn.send({
+                type: 'file-chunk',
+                fileId: fileId,
+                chunkIndex: chunkIndex,
+                data: buffer
+            });
+        } catch (_) {
+            showToast('Transfer interrupted — will resume on reconnect.', 'error');
+            finishOutgoingFileCard(fileId, '?', 0);
+            return;
+        }
+
         bytesSent += buffer.byteLength;
 
         const now = performance.now();
-        const elapsed = now - startTime;
-        const percent = Math.round((chunkIndex / totalChunks) * 100);
-        let speed = 0;
-        if (now - lastSpeedUpdate > 500) {
-            speed = ((bytesSent - lastBytesAtSpeedUpdate) / ((now - lastSpeedUpdate) / 1000));
-            lastSpeedUpdate = now;
-            lastBytesAtSpeedUpdate = bytesSent;
-        } else if (elapsed > 0) {
-            speed = bytesSent / (elapsed / 1000);
-        }
-        updateFileCardProgress(fileId, percent, speed);
-
-        if (chunkIndex % YIELD_INTERVAL === 0) {
-            await new Promise(r => setTimeout(r, YIELD_MS));
+        if (now - lastDomUpdate >= 100) {
+            lastDomUpdate = now;
+            let speed = 0;
+            const windowElapsed = now - lastSpeedUpdate;
+            if (windowElapsed > 500) {
+                speed = ((bytesSent - lastBytesAtSpeedUpdate) / (windowElapsed / 1000));
+                lastSpeedUpdate = now;
+                lastBytesAtSpeedUpdate = bytesSent;
+            } else {
+                const elapsed = now - startTime;
+                if (elapsed > 0) speed = bytesSent / (elapsed / 1000);
+            }
+            const percent = Math.round(((chunkIndex + 1) / totalChunks) * 100);
+            updateFileCardProgress(fileId, percent, speed);
         }
     }
 
+    delete pendingTransfers[fileId];
     conn.send({ type: 'file-end', fileId: fileId });
 
     computeFileHash(file).then(hash => {
@@ -442,6 +585,8 @@ function addIncomingFileCard(fileId, name, size) {
     card.id = `file-card-${fileId}`;
     card.className = 'file-card';
 
+    const canStreamToDisk = typeof window.showSaveFilePicker === 'function';
+
     card.innerHTML = `
         <div class="feed-card-header">
             <span class="badge badge-emerald">
@@ -461,7 +606,14 @@ function addIncomingFileCard(fileId, name, size) {
         <div class="progress-track">
             <div class="progress-bar emerald" style="width:0%"></div>
         </div>
-        <div class="file-card-actions action-area"></div>
+        <div class="file-preview" id="preview-${fileId}"></div>
+        <div class="file-card-actions action-area visible">
+            ${canStreamToDisk ? `
+            <button onclick="startStreamToDisk('${fileId}')" class="btn-action btn-action-ghost" id="save-disk-btn-${fileId}">
+                <i class="fa-solid fa-hard-drive"></i> Save to Disk
+            </button>
+            ` : ''}
+        </div>
     `;
 
     feedContainer.insertBefore(card, feedContainer.firstChild);
@@ -500,10 +652,18 @@ function addOutgoingFileCard(fileId, name, size) {
 }
 
 function updateFileCardProgress(fileId, percent, speed) {
+    const cached = fileDomCache[fileId];
+    if (cached) {
+        cached.bar.style.width = `${percent}%`;
+        const speedStr = speed > 0 ? ` at ${formatBytes(Math.round(speed))}/s` : '';
+        cached.text.textContent = `Transferring... ${percent}%${speedStr}`;
+        return;
+    }
     const card = $(`file-card-${fileId}`);
     if (!card) return;
     const bar = card.querySelector('.progress-bar');
     const text = card.querySelector('.progress-text');
+    fileDomCache[fileId] = { bar, text };
     if (bar) bar.style.width = `${percent}%`;
     if (text) {
         const speedStr = speed > 0 ? ` at ${formatBytes(Math.round(speed))}/s` : '';
@@ -512,8 +672,12 @@ function updateFileCardProgress(fileId, percent, speed) {
 }
 
 function finishFileCard(fileId, downloadUrl, name, size, verificationStatus) {
+    delete fileDomCache[fileId];
     const card = $(`file-card-${fileId}`);
     if (!card) return;
+
+    const fileObj = incomingFiles[fileId];
+    const wasStreamed = fileObj && fileObj.diskWritable;
 
     const text = card.querySelector('.progress-text');
     if (verificationStatus === 'pending') {
@@ -535,6 +699,11 @@ function finishFileCard(fileId, downloadUrl, name, size, verificationStatus) {
         bar.classList.replace('emerald', 'emerald-light');
     }
 
+    const previewEl = card.querySelector('.file-preview');
+    if (previewEl && !previewEl.hasChildNodes() && downloadUrl && fileObj && fileObj.fileType) {
+        addFilePreview(previewEl, fileObj.fileType, downloadUrl);
+    }
+
     const actionArea = card.querySelector('.action-area');
     if (actionArea) {
         actionArea.classList.add('visible');
@@ -543,7 +712,11 @@ function finishFileCard(fileId, downloadUrl, name, size, verificationStatus) {
         let vbIcon = 'fa-hard-drive';
         let vbText = formatBytes(size);
 
-        if (verificationStatus === 'verified') {
+        if (wasStreamed) {
+            vbClass = 'vb-emerald';
+            vbIcon = 'fa-hard-drive';
+            vbText = 'Saved to Disk';
+        } else if (verificationStatus === 'verified') {
             vbClass = 'vb-emerald';
             vbIcon = 'fa-shield-check';
             vbText = 'Verified';
@@ -557,21 +730,82 @@ function finishFileCard(fileId, downloadUrl, name, size, verificationStatus) {
             vbText = 'Verifying...';
         }
 
-        const canStreamToDisk = typeof window.showSaveFilePicker === 'function';
+        if (wasStreamed) {
+            actionArea.innerHTML = `
+                <span class="verification-badge ${vbClass}">
+                    <i class="fa-solid ${vbIcon}"></i> ${vbText}
+                </span>
+            `;
+        } else {
+            const canStreamToDisk = typeof window.showSaveFilePicker === 'function';
 
-        actionArea.innerHTML = `
-            <span class="verification-badge ${vbClass}">
-                <i class="fa-solid ${vbIcon}"></i> ${vbText}
-            </span>
-            ${canStreamToDisk ? `
-            <button onclick="streamToDisk('${fileId}')" class="btn-action btn-action-ghost">
-                <i class="fa-solid fa-hard-drive"></i> Save to Disk
-            </button>
-            ` : ''}
-            <a href="${downloadUrl}" download="${escapeHtml(name)}" class="btn-action btn-action-success">
-                <i class="fa-solid fa-download"></i> Download
-            </a>
-        `;
+            actionArea.innerHTML = `
+                <span class="verification-badge ${vbClass}">
+                    <i class="fa-solid ${vbIcon}"></i> ${vbText}
+                </span>
+                ${canStreamToDisk ? `
+                <button onclick="streamToDisk('${fileId}')" class="btn-action btn-action-ghost">
+                    <i class="fa-solid fa-hard-drive"></i> Save to Disk
+                </button>
+                ` : ''}
+                <a href="${downloadUrl}" download="${escapeHtml(name)}" class="btn-action btn-action-success">
+                    <i class="fa-solid fa-download"></i> Download
+                </a>
+            `;
+        }
+    }
+}
+
+async function startStreamToDisk(fileId) {
+    const fileObj = incomingFiles[fileId];
+    if (!fileObj || fileObj.diskWritable) return;
+
+    try {
+        const handle = await window.showSaveFilePicker({
+            suggestedName: fileObj.name,
+            types: [{
+                description: 'All Files',
+                accept: { '*/*': [] }
+            }]
+        });
+        const writable = await handle.createWritable();
+        fileObj.diskHandle = handle;
+        fileObj.diskWritable = writable;
+
+        const btn = $(`save-disk-btn-${fileId}`);
+        if (btn) {
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Saving to Disk...';
+            btn.disabled = true;
+            btn.onclick = null;
+        }
+
+        if (fileObj.buffers) {
+            const bufferedChunks = [];
+            for (let i = 0; i < fileObj.buffers.length; i++) {
+                if (fileObj.buffers[i]) bufferedChunks.push({ index: i, data: fileObj.buffers[i] });
+            }
+            bufferedChunks.sort((a, b) => a.index - b.index);
+            fileObj.pendingDiskWrite = fileObj.pendingDiskWrite.then(async () => {
+                for (const chunk of bufferedChunks) {
+                    await writable.write(new Uint8Array(chunk.data));
+                }
+            });
+            fileObj.buffers = null;
+        }
+
+        showToast('Streaming directly to disk...', 'info');
+    } catch (err) {
+        if (err.name !== 'AbortError') {
+            showToast('Failed to open save dialog.', 'error');
+        }
+    }
+}
+
+function showDiskSaveComplete(fileId) {
+    const btn = $(`save-disk-btn-${fileId}`);
+    if (btn) {
+        btn.innerHTML = '<i class="fa-solid fa-check" style="color:var(--emerald-400)"></i> Saved to Disk';
+        btn.disabled = false;
     }
 }
 
@@ -654,7 +888,7 @@ function setupDragAndDrop() {
     dropzone.addEventListener('drop', (e) => {
         const files = e.dataTransfer.files;
         if (files && files.length > 0) {
-            setSelectedFileUI(files[0]);
+            addFilesToQueue(Array.from(files));
         }
     }, false);
 }
@@ -662,33 +896,80 @@ function setupDragAndDrop() {
 function handleFileSelect(e) {
     const files = e.target.files;
     if (files && files.length > 0) {
-        setSelectedFileUI(files[0]);
+        addFilesToQueue(Array.from(files));
+        e.target.value = '';
     }
 }
 
-function setSelectedFileUI(file) {
-    selectedFile = file;
-    dropzonePrompt.classList.add('hidden');
-    selectedFileState.classList.remove('hidden');
-    selectedFileName.textContent = file.name;
-    selectedFileSize.textContent = formatBytes(file.size);
-    selectedFileIcon.className = `fa-solid ${getFileIconClass(file.name)}`;
+function addFilesToQueue(newFiles) {
+    for (const file of newFiles) {
+        if (!selectedFiles.some(f => f.name === file.name && f.size === file.size)) {
+            selectedFiles.push(file);
+        }
+    }
+    updateFileListUI();
 }
 
-function clearSelectedFile(e) {
+function removeFile(index) {
+    selectedFiles.splice(index, 1);
+    updateFileListUI();
+}
+
+function clearAllFiles(e) {
     if (e) e.stopPropagation();
-    selectedFile = null;
+    selectedFiles = [];
     $('fileInput').value = '';
     selectedFileState.classList.add('hidden');
     dropzonePrompt.classList.remove('hidden');
 }
 
-function sendSelectedFile(e) {
-    e.stopPropagation();
-    if (!selectedFile) return;
-    const fileToSend = selectedFile;
-    clearSelectedFile(null);
-    sendFileOverWebRTC(fileToSend);
+function updateFileListUI() {
+    if (selectedFiles.length === 0) {
+        selectedFiles = [];
+        $('fileInput').value = '';
+        selectedFileState.classList.add('hidden');
+        dropzonePrompt.classList.remove('hidden');
+        return;
+    }
+    dropzonePrompt.classList.add('hidden');
+    selectedFileState.classList.remove('hidden');
+
+    const fileList = $('fileList');
+    const summary = $('fileListSummary');
+
+    fileList.innerHTML = selectedFiles.map((file, i) => `
+        <div class="file-list-item">
+            <div class="selected-file-info">
+                <div class="file-icon-box emerald">
+                    <i class="fa-solid ${getFileIconClass(file.name)}"></i>
+                </div>
+                <div class="file-details">
+                    <p class="file-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</p>
+                    <p class="file-size">${formatBytes(file.size)}</p>
+                </div>
+            </div>
+            <button type="button" onclick="removeFile(${i})" class="btn-clear-file">
+                <i class="fa-solid fa-xmark"></i>
+            </button>
+        </div>
+    `).join('');
+
+    const totalSize = selectedFiles.reduce((sum, f) => sum + f.size, 0);
+    summary.textContent = `${selectedFiles.length} file${selectedFiles.length > 1 ? 's' : ''} \u2014 ${formatBytes(totalSize)}`;
+}
+
+async function sendAllFiles(e) {
+    if (e) e.stopPropagation();
+    if (selectedFiles.length === 0) return;
+    if (!conn || !conn.open) {
+        showToast('Connect to a peer device before sending files.', 'error');
+        return;
+    }
+    const filesToSend = [...selectedFiles];
+    clearAllFiles(null);
+    for (const file of filesToSend) {
+        await sendFileOverWebRTC(file);
+    }
 }
 
 // --- QR CODE & AUTO-JOIN ---
@@ -843,6 +1124,54 @@ function playNotificationPulse() {
     const header = document.querySelector('header');
     header.style.borderColor = 'rgba(16, 185, 129, 0.8)';
     setTimeout(() => header.style.borderColor = '', 1000);
+}
+
+function playReceiveSound() {
+    try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(880, ctx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(440, ctx.currentTime + 0.15);
+        gain.gain.setValueAtTime(0.12, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+        osc.start(ctx.currentTime);
+        osc.stop(ctx.currentTime + 0.3);
+    } catch (_) {}
+}
+
+function addFilePreview(container, fileType, blobUrl) {
+    if (fileType.startsWith('image/')) {
+        const img = document.createElement('img');
+        img.src = blobUrl;
+        img.className = 'preview-image';
+        img.loading = 'lazy';
+        img.onload = () => container.appendChild(img);
+    } else if (fileType.startsWith('video/')) {
+        const vid = document.createElement('video');
+        vid.src = blobUrl;
+        vid.className = 'preview-video';
+        vid.controls = true;
+        vid.preload = 'metadata';
+        container.appendChild(vid);
+    } else if (fileType.startsWith('audio/')) {
+        const aud = document.createElement('audio');
+        aud.src = blobUrl;
+        aud.className = 'preview-audio';
+        aud.controls = true;
+        container.appendChild(aud);
+    } else if (fileType.startsWith('text/') || fileType === 'application/json' || fileType === 'application/javascript') {
+        fetch(blobUrl).then(r => r.text()).then(text => {
+            const truncated = text.length > 600 ? text.slice(0, 600) + '\n...' : text;
+            const pre = document.createElement('pre');
+            pre.className = 'preview-text';
+            pre.textContent = truncated;
+            container.appendChild(pre);
+        }).catch(() => {});
+    }
 }
 
 function formatBytes(bytes) {

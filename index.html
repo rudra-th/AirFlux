@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PassCode | Ephemeral P2P AirDrop & Text Bridge</title>
+    <title>AirFlux | Ephemeral P2P AirDrop & Text Bridge</title>
     <meta name="description" content="Peer-to-peer file and text sharing over WebRTC. No servers, no storage, complete privacy.">
 
     <!-- Fonts -->
@@ -54,7 +54,7 @@
                     <i class="fa-solid fa-bolt-lightning"></i>
                 </div>
                 <div>
-                    <span class="brand-name">PassCode</span>
+                    <span class="brand-name">AirFlux</span>
                     <span class="brand-badge">WebRTC P2P</span>
                 </div>
             </div>
@@ -141,34 +141,27 @@
                         onclick="document.getElementById('fileInput').click()"
                         class="dropzone"
                     >
-                        <input type="file" id="fileInput" class="hidden" onchange="handleFileSelect(event)">
+                        <input type="file" id="fileInput" class="hidden" onchange="handleFileSelect(event)" multiple>
 
                         <div id="dropzonePrompt">
                             <div class="dropzone-icon">
                                 <i class="fa-solid fa-cloud-arrow-up"></i>
                             </div>
                             <p class="dropzone-text">Click to browse or drag & drop</p>
-                            <p class="dropzone-hint">Any file type &bull; Direct browser-to-browser stream</p>
+                            <p class="dropzone-hint">Any file type &bull; Multiple files supported &bull; Direct P2P stream</p>
                         </div>
 
-                        <!-- Selected File State -->
+                        <!-- Selected Files State -->
                         <div id="selectedFileState" class="selected-file-state hidden">
-                            <div class="selected-file-row">
-                                <div class="selected-file-info">
-                                    <div class="file-icon-box emerald">
-                                        <i class="fa-solid fa-file" id="selectedFileIcon"></i>
-                                    </div>
-                                    <div class="file-details">
-                                        <p class="file-name" id="selectedFileName">filename.ext</p>
-                                        <p class="file-size" id="selectedFileSize">0 KB</p>
-                                    </div>
-                                </div>
-                                <button type="button" onclick="clearSelectedFile(event)" class="btn-clear-file">
-                                    <i class="fa-solid fa-xmark"></i>
+                            <div id="fileList" class="file-list"></div>
+                            <div class="file-list-footer">
+                                <span id="fileListSummary" class="file-list-summary"></span>
+                                <button type="button" onclick="clearAllFiles(event)" class="btn-clear-file">
+                                    <i class="fa-solid fa-xmark"></i> Clear
                                 </button>
                             </div>
-                            <button type="button" id="sendFileBtn" onclick="sendSelectedFile(event)" class="btn-send-file">
-                                <i class="fa-solid fa-paper-plane"></i> Stream File Now
+                            <button type="button" onclick="sendAllFiles(event)" class="btn-send-file">
+                                <i class="fa-solid fa-paper-plane"></i> Stream Files Now
                             </button>
                         </div>
                     </div>
@@ -242,7 +235,8 @@
 
     <!-- Footer -->
     <footer>
-        <p>PassCode runs 100% locally in your browser. Zero servers, zero storage, complete privacy.</p>
+        <p>AirFlux runs 100% locally in your browser. Zero servers, zero storage, complete privacy.</p>
+        <p class="footer-credit">Made By <a href="https://github.com/rudra-th/" target="_blank" rel="noopener noreferrer">Rudra <i class="fa-brands fa-github"></i></a></p>
     </footer>
 
     <!-- Application Script -->

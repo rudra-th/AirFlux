@@ -1,5 +1,5 @@
 {
-  "name": "passcode",
+  "name": "airflux",
   "version": "1.0.0",
   "description": "Ephemeral peer-to-peer file and text sharing over WebRTC. No servers, no storage, complete privacy.",
   "main": "index.html",
