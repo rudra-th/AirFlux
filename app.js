@@ -835,7 +835,7 @@ function addIncomingFileCard(fileId, name, size) {
             <div class="prog-bar green" style="width:0%"></div>
         </div>
         <div class="file-preview" id="preview-${fileId}"></div>
-        <div class="file-card-actions">
+        <div class="file-card-actions ${hasDiskApi ? 'show' : ''}">
             ${hasDiskApi ? `<button class="btn-action btn-action-ghost" id="save-disk-btn-${fileId}" data-disk-stream="${fileId}">
                 <i class="fa-solid fa-hard-drive" aria-hidden="true"></i> Save to Disk
             </button>` : ''}
@@ -930,6 +930,7 @@ function finishFileCard(fileId, downloadUrl, name, size, status) {
 
     const area = card.querySelector('.file-card-actions');
     if (!area) return;
+    area.classList.add('show');
 
     const vb = {
         pending:    ['vbadge-amber',   'fa-spinner fa-spin',       'Verifying…'],
