@@ -604,7 +604,7 @@ function renderFileQueue() {
     list.innerHTML = selectedFiles.map((f, i) => `
         <div class="file-list-item">
             <div class="selected-file-info">
-                <div class="file-icon-box emerald">
+                <div class="file-icon green">
                     <i class="fa-solid ${fileIcon(f.name)}"></i>
                 </div>
                 <div class="file-details">
@@ -758,16 +758,16 @@ function addIncomingTextCard(content, timestamp) {
 
     // Use data attributes for copy/open to avoid inline onclick XSS risk
     card.innerHTML = `
-        <div class="feed-card-header">
-            <span class="badge ${isUrl ? 'badge-indigo' : 'badge-indigo'}">
+        <div class="card-header">
+            <span class="badge ${isUrl ? 'badge-violet' : 'badge-violet'}">
                 <i class="fa-solid ${isUrl ? 'fa-link' : 'fa-message'}" aria-hidden="true"></i>
                 ${isUrl ? 'URL' : 'Text'}
             </span>
             <span class="badge-time">${fmtTime(timestamp)}</span>
         </div>
-        <div class="feed-card-body">${esc(content)}</div>
-        <div class="feed-card-actions">
-            ${isUrl ? `<button class="btn-action btn-action-indigo" data-open-url>
+        <div class="card-body">${esc(content)}</div>
+        <div class="card-actions">
+            ${isUrl ? `<button class="btn-action btn-action-primary" data-open-url>
                 <i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true"></i> Open
             </button>` : ''}
             <button class="btn-action btn-action-ghost" data-copy-text>
@@ -796,13 +796,13 @@ function addOutgoingTextCard(content, timestamp) {
     const card = document.createElement('div');
     card.className = 'feed-card sent';
     card.innerHTML = `
-        <div class="feed-card-header">
-            <span class="badge badge-sent">
+        <div class="card-header">
+            <span class="badge badge-dim">
                 <i class="fa-solid fa-arrow-right-from-bracket" aria-hidden="true"></i> Sent
             </span>
             <span class="badge-time">${fmtTime(timestamp)}</span>
         </div>
-        <div class="feed-card-body sent-body">${esc(content)}</div>`;
+        <div class="card-body dim">${esc(content)}</div>`;
     $feedContainer.insertBefore(card, $feedContainer.firstChild);
 }
 
@@ -816,26 +816,26 @@ function addIncomingFileCard(fileId, name, size) {
     card.id        = `file-card-${fileId}`;
     card.className = 'file-card';
     card.innerHTML = `
-        <div class="feed-card-header">
-            <span class="badge badge-emerald">
+        <div class="card-header">
+            <span class="badge badge-green">
                 <i class="fa-solid fa-cloud-arrow-down" aria-hidden="true"></i> Incoming
             </span>
-            <span class="file-size-badge">${fmtBytes(size)}</span>
+            <span class="file-size-tag">${fmtBytes(size)}</span>
         </div>
         <div class="file-card-row">
-            <div class="file-icon-box emerald" aria-hidden="true">
+            <div class="file-icon green" aria-hidden="true">
                 <i class="fa-solid ${fileIcon(name)}"></i>
             </div>
             <div class="file-card-meta">
                 <p class="file-card-name" title="${esc(name)}">${esc(name)}</p>
-                <p class="file-card-progress-text progress-text">Receiving… 0%</p>
+                <p class="file-card-progress">Receiving… 0%</p>
             </div>
         </div>
-        <div class="progress-track" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
-            <div class="progress-bar emerald" style="width:0%"></div>
+        <div class="prog-track" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
+            <div class="prog-bar green" style="width:0%"></div>
         </div>
         <div class="file-preview" id="preview-${fileId}"></div>
-        <div class="file-card-actions action-area">
+        <div class="file-card-actions">
             ${hasDiskApi ? `<button class="btn-action btn-action-ghost" id="save-disk-btn-${fileId}" data-disk-stream="${fileId}">
                 <i class="fa-solid fa-hard-drive" aria-hidden="true"></i> Save to Disk
             </button>` : ''}
@@ -856,23 +856,23 @@ function addOutgoingFileCard(fileId, name, size) {
     card.id        = `file-card-${fileId}`;
     card.className = 'file-card outgoing';
     card.innerHTML = `
-        <div class="feed-card-header">
-            <span class="badge badge-teal">
+        <div class="card-header">
+            <span class="badge badge-sky">
                 <i class="fa-solid fa-cloud-arrow-up" aria-hidden="true"></i> Sending
             </span>
-            <span class="file-size-badge">${fmtBytes(size)}</span>
+            <span class="file-size-tag">${fmtBytes(size)}</span>
         </div>
         <div class="file-card-row">
-            <div class="file-icon-box teal" aria-hidden="true">
+            <div class="file-icon sky" aria-hidden="true">
                 <i class="fa-solid ${fileIcon(name)}"></i>
             </div>
             <div class="file-card-meta">
                 <p class="file-card-name">${esc(name)}</p>
-                <p class="file-card-progress-text progress-text">Streaming… 0%</p>
+                <p class="file-card-progress">Streaming… 0%</p>
             </div>
         </div>
-        <div class="progress-track" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
-            <div class="progress-bar teal" style="width:0%"></div>
+        <div class="prog-track" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
+            <div class="prog-bar sky" style="width:0%"></div>
         </div>`;
     $feedContainer.insertBefore(card, $feedContainer.firstChild);
 }
@@ -887,7 +887,7 @@ function updateFileCardProgress(fileId, percent, speed, remaining) {
         const card = id(`file-card-${fileId}`);
         if (!card) return;
         const bar  = card.querySelector('.progress-bar');
-        const text = card.querySelector('.progress-text');
+        const text = card.querySelector('.file-card-progress');
         const track = card.querySelector('.progress-track');
         if (!bar || !text) return;
         fileDomCache[fileId] = c = { bar, text, track };
@@ -907,7 +907,7 @@ function finishFileCard(fileId, downloadUrl, name, size, status) {
     const fo         = incomingFiles[fileId];
     const wasStreamed = fo && fo.diskWritable;
 
-    const textEl = card.querySelector('.progress-text');
+    const textEl = card.querySelector('.file-card-progress');
     if (textEl) {
         const msg = {
             pending:    'Complete — verifying integrity…',
@@ -921,32 +921,32 @@ function finishFileCard(fileId, downloadUrl, name, size, status) {
 
     const bar   = card.querySelector('.progress-bar');
     const track = card.querySelector('.progress-track');
-    if (bar)   { bar.style.width = '100%'; bar.classList.replace('emerald', 'emerald-light'); }
+    if (bar)   { bar.style.width = '100%'; bar.classList.replace('green','green-done'); }
     if (track) { track.setAttribute('aria-valuenow', 100); }
 
     const preview = card.querySelector('.file-preview');
     if (preview && !preview.hasChildNodes() && downloadUrl && fo && fo.fileType)
         addFilePreview(preview, fo.fileType, downloadUrl);
 
-    const area = card.querySelector('.action-area');
+    const area = card.querySelector('.file-card-actions');
     if (!area) return;
 
     const vb = {
-        pending:    ['vb-amber',   'fa-spinner fa-spin',       'Verifying…'],
-        verified:   ['vb-emerald', 'fa-shield-check',          'Verified'],
-        mismatch:   ['vb-red',     'fa-triangle-exclamation',  'Hash mismatch'],
-        unverified: ['vb-slate',   'fa-circle-info',           'No checksum'],
-    }[status] || ['vb-slate', 'fa-hard-drive', fmtBytes(size)];
+        pending:    ['vbadge-amber',   'fa-spinner fa-spin',       'Verifying…'],
+        verified:   ['vbadge-green', 'fa-shield-check',          'Verified'],
+        mismatch:   ['vbadge-red',     'fa-triangle-exclamation',  'Hash mismatch'],
+        unverified: ['vbadge-dim',   'fa-circle-info',           'No checksum'],
+    }[status] || ['vbadge-dim', 'fa-hard-drive', fmtBytes(size)];
 
     if (wasStreamed) {
         area.innerHTML = `
-            <span class="verification-badge ${vb[0]}">
+            <span class="vbadge ${vb[0]}">
                 <i class="fa-solid ${vb[1]}" aria-hidden="true"></i> ${vb[2]}
             </span>`;
     } else {
         const hasDiskApi = typeof window.showSaveFilePicker === 'function';
         area.innerHTML = `
-            <span class="verification-badge ${vb[0]}">
+            <span class="vbadge ${vb[0]}">
                 <i class="fa-solid ${vb[1]}" aria-hidden="true"></i> ${vb[2]}
             </span>
             ${hasDiskApi ? `<button class="btn-action btn-action-ghost" data-disk-save="${fileId}">
@@ -972,7 +972,7 @@ function finishFileCard(fileId, downloadUrl, name, size, status) {
 function finishOutgoingFileCard(fileId, totalTime, avgSpeed) {
     const card = id(`file-card-${fileId}`);
     if (!card) return;
-    const text = card.querySelector('.progress-text');
+    const text = card.querySelector('.file-card-progress');
     if (text) text.textContent =
         `Delivered in ${totalTime}s${avgSpeed > 0 ? `, avg ${fmtBytes(Math.round(avgSpeed))}/s` : ''}`;
 }
@@ -1003,21 +1003,21 @@ function addFilePreview(container, fileType, blobUrl) {
     if (fileType.startsWith('image/')) {
         const img  = document.createElement('img');
         img.src    = blobUrl;
-        img.className = 'preview-image';
+        img.className = 'preview-img';
         img.loading   = 'lazy';
         img.alt       = 'Preview';
         img.onload    = () => container.appendChild(img);
     } else if (fileType.startsWith('video/')) {
         const vid  = document.createElement('video');
         vid.src    = blobUrl;
-        vid.className = 'preview-video';
+        vid.className = 'preview-vid';
         vid.controls  = true;
         vid.preload   = 'metadata';
         container.appendChild(vid);
     } else if (fileType.startsWith('audio/')) {
         const aud  = document.createElement('audio');
         aud.src    = blobUrl;
-        aud.className = 'preview-audio';
+        aud.className = 'preview-aud';
         aud.controls  = true;
         container.appendChild(aud);
     } else if (fileType.startsWith('text/') ||
@@ -1025,7 +1025,7 @@ function addFilePreview(container, fileType, blobUrl) {
                fileType === 'application/javascript') {
         fetch(blobUrl).then(r => r.text()).then(text => {
             const pre = document.createElement('pre');
-            pre.className   = 'preview-text';
+            pre.className = 'preview-txt';
             pre.textContent = text.length > 600 ? text.slice(0, 600) + '\n…' : text;
             container.appendChild(pre);
         }).catch(() => {});
@@ -1127,10 +1127,10 @@ function showToast(message, type = 'info') {
     toast.appendChild(iconEl);
     toast.appendChild(msgEl);
     container.appendChild(toast);
-    requestAnimationFrame(() => toast.classList.add('toast-show'));
+    requestAnimationFrame(() => toast.classList.add('toast-in'));
     setTimeout(() => {
-        toast.classList.remove('toast-show');
-        toast.classList.add('toast-hide');
+        toast.classList.remove('toast-in');
+        toast.classList.add('toast-out');
         setTimeout(() => toast.remove(), 300);
     }, 3500);
 }

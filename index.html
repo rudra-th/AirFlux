@@ -1,266 +1,250 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AirFlux | Ephemeral P2P AirDrop & Text Bridge</title>
-    <meta name="description" content="Peer-to-peer file and text sharing over WebRTC. No servers, no storage, complete privacy.">
-    <meta name="theme-color" content="#020617">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>AirFlux — P2P File & Text Transfer</title>
+  <meta name="description" content="Browser-to-browser file and text sharing via WebRTC. No servers, no storage, zero data leaves your device.">
+  <meta name="theme-color" content="#020617">
 
-    <!-- Fonts -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 
-    <!-- PeerJS -->
-    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
-
-    <!-- QRCode.js -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-
-    <!-- FontAwesome -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
-
-    <!-- Custom Styles -->
-    <link rel="stylesheet" href="styles.css">
+  <!-- PeerJS -->
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <!-- QRCode -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+  <!-- Icons -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+  <!-- App styles -->
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 
-    <!-- Toast Container -->
-    <div id="toastContainer" aria-live="polite" aria-atomic="false"></div>
+<!-- Toast container -->
+<div id="toastContainer" aria-live="assertive" aria-atomic="false"></div>
 
-    <!-- QR Code Modal -->
-    <div id="qrModal" role="dialog" aria-modal="true" aria-labelledby="qrModalTitle">
-        <div id="qrModalContent">
-            <button onclick="closeQrModal()" class="qr-close-btn" aria-label="Close QR modal">
-                <i class="fa-solid fa-xmark"></i>
-            </button>
-            <h3 class="qr-title" id="qrModalTitle">Scan to Connect</h3>
-            <p class="qr-subtitle">Point any phone camera at this QR code to instantly join this P2P room.</p>
-            <div class="qr-code-box" id="qrcode"></div>
-            <div class="qr-url-bar">
-                <span class="truncate" id="shareUrlText">Generating…</span>
-                <button onclick="copyShareUrl(this)" class="btn-ghost qr-copy-btn">
-                    <i class="fa-regular fa-copy"></i> Copy
-                </button>
-            </div>
+<!-- QR Modal -->
+<div id="qrModal" role="dialog" aria-modal="true" aria-labelledby="qrTitle">
+  <div id="qrModalContent">
+    <button class="qr-close" onclick="closeQrModal()" aria-label="Close">
+      <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+    </button>
+    <h3 class="qr-title" id="qrTitle">Scan to Connect</h3>
+    <p class="qr-sub">Point any camera at this QR code to join instantly.</p>
+    <div class="qr-box" id="qrcode"></div>
+    <div class="qr-url">
+      <span class="qr-url-text" id="shareUrlText">Generating…</span>
+      <button class="btn-ghost" onclick="copyShareUrl(this)" aria-label="Copy link">
+        <i class="fa-regular fa-copy" aria-hidden="true"></i> Copy
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Header -->
+<header>
+  <div class="header-inner">
+    <div class="brand">
+      <div class="brand-icon" aria-hidden="true">
+        <i class="fa-solid fa-bolt-lightning"></i>
+      </div>
+      <span class="brand-name">AirFlux</span>
+      <span class="brand-tag">WebRTC</span>
+    </div>
+    <div id="statusPill" class="status-pill disconnected" role="status" aria-live="polite">
+      <span id="statusDot" class="status-dot disconnected" aria-hidden="true"></span>
+      <span id="statusText">Disconnected</span>
+    </div>
+  </div>
+</header>
+
+<main>
+
+  <!-- ── Connection Hub ── -->
+  <section class="connection-hub" aria-label="Connection setup">
+
+    <!-- My code -->
+    <div class="my-code-card">
+      <div class="code-card-top">
+        <div>
+          <span class="code-card-label">Your Room Code</span>
+          <p class="code-card-sub">Share with the other device to connect</p>
         </div>
+        <button class="btn-ghost" onclick="openQrModal()" aria-label="Show QR code">
+          <i class="fa-solid fa-qrcode" aria-hidden="true" style="color:var(--c-green-hi)"></i>
+          QR
+        </button>
+      </div>
+      <div class="code-display">
+        <div class="code-value-group">
+          <div class="code-pulse-bar" aria-hidden="true"></div>
+          <span id="myRoomCode" aria-label="Your 4-digit room code" aria-live="polite">----</span>
+        </div>
+        <button class="btn-icon btn-copy" onclick="copyRoomCode(this)" aria-label="Copy room code">
+          <i class="fa-regular fa-copy" aria-hidden="true"></i>
+        </button>
+      </div>
     </div>
 
-    <!-- Header -->
-    <header>
-        <div class="header-inner">
-            <div class="brand">
-                <div class="brand-icon" aria-hidden="true">
-                    <i class="fa-solid fa-bolt-lightning"></i>
-                </div>
-                <div>
-                    <span class="brand-name">AirFlux</span>
-                    <span class="brand-badge">WebRTC P2P</span>
-                </div>
-            </div>
-            <div class="header-right">
-                <div id="statusPill" class="status-pill disconnected" role="status" aria-live="polite">
-                    <span id="statusDot" class="status-dot disconnected" aria-hidden="true"></span>
-                    <span id="statusText">Disconnected</span>
-                </div>
-            </div>
+    <!-- Join -->
+    <div class="card join-card">
+      <div>
+        <span class="join-label">Connect to Peer</span>
+        <p class="join-sub">Enter the 4-digit code shown on the other device</p>
+      </div>
+      <form id="joinForm" onsubmit="handleJoin(event)" class="join-form">
+        <div class="join-input-wrap">
+          <span class="join-input-icon" aria-hidden="true">
+            <i class="fa-solid fa-hashtag"></i>
+          </span>
+          <input
+            type="text"
+            id="joinCodeInput"
+            maxlength="4"
+            placeholder="4-digit code"
+            autocomplete="off"
+            inputmode="numeric"
+            pattern="[0-9]{4}"
+            aria-label="Enter peer room code"
+            spellcheck="false"
+          >
         </div>
-    </header>
+        <button type="submit" id="connectBtn" class="btn btn-primary">
+          <i class="fa-solid fa-plug" aria-hidden="true"></i>
+          Connect
+        </button>
+      </form>
+    </div>
 
-    <!-- Main Content -->
-    <main>
+  </section>
 
-        <!-- Connection Hub -->
-        <section class="connection-hub" aria-label="Connection setup">
+  <!-- ── Workspace ── -->
+  <section class="workspace" aria-label="Transfer workspace">
 
-            <!-- My Room Code Card -->
-            <div class="my-code-card">
-                <div class="my-code-card-header">
-                    <div>
-                        <span class="code-label">Your Room Code</span>
-                        <p class="code-sublabel">Share this 4-digit code or QR with your other device</p>
-                    </div>
-                    <button onclick="openQrModal()" class="btn-ghost my-code-qr-btn" aria-label="Show QR code">
-                        <i class="fa-solid fa-qrcode" style="color:var(--emerald-400)"></i> QR Code
-                    </button>
-                </div>
-                <div class="code-display">
-                    <div class="code-value-group">
-                        <div class="code-bar" aria-hidden="true"></div>
-                        <span id="myRoomCode" aria-label="Your room code">----</span>
-                    </div>
-                    <button onclick="copyRoomCode(this)" class="btn-icon btn-icon-copy" title="Copy room code" aria-label="Copy room code">
-                        <i class="fa-regular fa-copy"></i>
-                    </button>
-                </div>
+    <!-- Left: Send panel -->
+    <div class="workspace-left">
+
+      <!-- File drop -->
+      <div class="card">
+        <div class="section-heading">
+          <div class="section-heading-left">
+            <i class="fa-solid fa-file-arrow-up section-heading-icon" style="color:var(--c-green-hi)" aria-hidden="true"></i>
+            Send Files
+          </div>
+          <span class="section-heading-sub">Any type · Any size</span>
+        </div>
+
+        <div
+          id="dropzone"
+          class="dropzone"
+          role="button"
+          tabindex="0"
+          aria-label="Drop files here or click to browse"
+          onclick="document.getElementById('fileInput').click()"
+          onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();document.getElementById('fileInput').click()}"
+        >
+          <input type="file" id="fileInput" class="hidden" onchange="handleFileSelect(event)" multiple aria-hidden="true" tabindex="-1">
+
+          <div id="dropzonePrompt">
+            <div class="dropzone-icon-wrap" aria-hidden="true">
+              <i class="fa-solid fa-cloud-arrow-up"></i>
             </div>
+            <p class="dropzone-label">Drop files here or click to browse</p>
+            <p class="dropzone-hint">Multiple files · Direct P2P stream · No size limit on Chrome</p>
+          </div>
 
-            <!-- Join Room Card -->
-            <div class="card join-card">
-                <div class="join-card-header">
-                    <span class="join-card-title">Connect to Peer</span>
-                    <p class="join-card-subtitle">Enter a 4-digit code from another device to establish a direct P2P link</p>
-                </div>
-                <!-- Note: onsubmit on the form handles both button click and Enter key -->
-                <form id="joinForm" onsubmit="handleJoin(event)" class="join-form">
-                    <div class="join-input-wrap">
-                        <div class="join-input-icon" aria-hidden="true">
-                            <i class="fa-solid fa-link"></i>
-                        </div>
-                        <input
-                            type="text"
-                            id="joinCodeInput"
-                            maxlength="4"
-                            placeholder="e.g. 4829"
-                            autocomplete="off"
-                            inputmode="numeric"
-                            pattern="[0-9]{4}"
-                            aria-label="Peer room code"
-                        >
-                    </div>
-                    <button type="submit" id="connectBtn" class="btn btn-primary">
-                        <i class="fa-solid fa-plug"></i> Connect
-                    </button>
-                </form>
+          <div id="selectedFileState" class="file-queue hidden">
+            <div id="fileList" class="file-list"></div>
+            <div class="file-queue-footer">
+              <span id="fileListSummary" class="file-queue-summary"></span>
+              <button type="button" class="btn-clear-file" onclick="clearAllFiles(event)">
+                <i class="fa-solid fa-xmark" aria-hidden="true"></i> Clear all
+              </button>
             </div>
+            <button type="button" id="sendFilesBtn" class="btn-send-file" onclick="sendAllFiles(event)">
+              <i class="fa-solid fa-paper-plane" aria-hidden="true"></i>
+              Stream to Peer
+            </button>
+          </div>
+        </div>
+      </div>
 
-        </section>
+      <!-- Text pad -->
+      <div class="card">
+        <div class="section-heading">
+          <div class="section-heading-left">
+            <i class="fa-solid fa-comment-dots section-heading-icon" style="color:var(--c-violet)" aria-hidden="true"></i>
+            Text &amp; URL
+          </div>
+          <span class="section-heading-sub">Instant clipboard</span>
+        </div>
+        <textarea
+          id="textInput"
+          class="text-pad"
+          rows="4"
+          placeholder="Paste a URL, code snippet, or note… Enter to send"
+          aria-label="Text or URL to send to peer"
+          spellcheck="false"
+        ></textarea>
+        <div class="text-pad-footer">
+          <span class="text-pad-hint">Enter to send · Shift+Enter for newline</span>
+          <button type="button" onclick="sendText()" class="btn-send-text">
+            <i class="fa-solid fa-share" aria-hidden="true"></i> Send
+          </button>
+        </div>
+      </div>
 
-        <!-- Split-Panel Workspace -->
-        <section class="workspace" aria-label="File and text transfer">
+    </div>
 
-            <!-- Left Panel: Sharing Canvas -->
-            <div class="workspace-left">
+    <!-- Right: Live feed -->
+    <div class="feed-panel" aria-label="Received transfers">
+      <div class="feed-header">
+        <div class="feed-header-left">
+          <div class="feed-live-dot" aria-hidden="true"></div>
+          <h2 class="feed-title">Live Feed</h2>
+          <span id="feedCount" class="feed-count" aria-label="Number of items received">0</span>
+        </div>
+        <button class="btn-clear-feed" onclick="clearFeed()" aria-label="Clear all feed items">
+          <i class="fa-regular fa-trash-can" aria-hidden="true"></i> Clear
+        </button>
+      </div>
 
-                <!-- File Dropzone -->
-                <div class="card">
-                    <h2 class="section-title">
-                        <span class="section-title-left">
-                            <i class="fa-solid fa-file-arrow-up" style="color:var(--emerald-400)"></i>
-                            Send File
-                        </span>
-                        <span class="section-subtitle">No RAM limits on Chromium</span>
-                    </h2>
+      <div id="feedContainer" role="log" aria-live="polite" aria-label="Transfer feed">
+        <div id="emptyState" class="empty-state">
+          <div class="empty-icon" aria-hidden="true">
+            <i class="fa-solid fa-satellite-dish"></i>
+          </div>
+          <p class="empty-title">Waiting for drops…</p>
+          <p class="empty-desc">Connect a device using the code above. Files and text will appear here instantly.</p>
+        </div>
+      </div>
 
-                    <div
-                        id="dropzone"
-                        onclick="document.getElementById('fileInput').click()"
-                        class="dropzone"
-                        role="button"
-                        tabindex="0"
-                        aria-label="Click to browse files or drag and drop"
-                        onkeydown="if(event.key==='Enter'||event.key===' '){document.getElementById('fileInput').click()}"
-                    >
-                        <input
-                            type="file"
-                            id="fileInput"
-                            class="hidden"
-                            onchange="handleFileSelect(event)"
-                            multiple
-                            aria-hidden="true"
-                            tabindex="-1"
-                        >
+      <!-- Disconnect overlay -->
+      <div id="retryOverlay" class="retry-overlay" role="alert" aria-live="assertive">
+        <div class="retry-icon" aria-hidden="true"><i class="fa-solid fa-link-slash"></i></div>
+        <p class="retry-msg">Peer disconnected. Enter their code again to reconnect.</p>
+        <button onclick="handleRetry()" class="btn-retry">
+          <i class="fa-solid fa-plug" aria-hidden="true"></i> Reconnect
+        </button>
+      </div>
+    </div>
 
-                        <div id="dropzonePrompt">
-                            <div class="dropzone-icon" aria-hidden="true">
-                                <i class="fa-solid fa-cloud-arrow-up"></i>
-                            </div>
-                            <p class="dropzone-text">Click to browse or drag &amp; drop</p>
-                            <p class="dropzone-hint">Any file type &bull; Multiple files &bull; Direct P2P stream</p>
-                        </div>
+  </section>
 
-                        <!-- Selected Files State -->
-                        <div id="selectedFileState" class="selected-file-state hidden">
-                            <div id="fileList" class="file-list"></div>
-                            <div class="file-list-footer">
-                                <span id="fileListSummary" class="file-list-summary"></span>
-                                <button type="button" onclick="clearAllFiles(event)" class="btn-clear-file">
-                                    <i class="fa-solid fa-xmark"></i> Clear all
-                                </button>
-                            </div>
-                            <button type="button" onclick="sendAllFiles(event)" class="btn-send-file">
-                                <i class="fa-solid fa-paper-plane"></i> Stream Files Now
-                            </button>
-                        </div>
-                    </div>
-                </div>
+</main>
 
-                <!-- Live Text / URL Pad -->
-                <div class="card">
-                    <h2 class="section-title">
-                        <span class="section-title-left">
-                            <i class="fa-solid fa-comment-dots" style="color:var(--indigo-400)"></i>
-                            Quick Text &amp; URL
-                        </span>
-                        <span class="section-subtitle">Instant clipboard</span>
-                    </h2>
+<footer>
+  <p>AirFlux transfers data directly between browsers — zero servers, zero storage, zero tracking.</p>
+  <p class="footer-credit">
+    Built by <a href="https://github.com/rudra-th/" target="_blank" rel="noopener noreferrer">
+      Rudra <i class="fa-brands fa-github" aria-hidden="true"></i>
+    </a>
+  </p>
+</footer>
 
-                    <div>
-                        <textarea
-                            id="textInput"
-                            rows="4"
-                            placeholder="Paste URLs, code snippets, secrets… Enter to send, Shift+Enter for newline"
-                            class="text-input"
-                            aria-label="Text or URL to send"
-                        ></textarea>
-                        <div class="text-input-footer">
-                            <span class="text-input-hint">Enter to send &nbsp;&bull;&nbsp; Shift+Enter for newline</span>
-                            <button type="button" onclick="sendText()" class="btn-send">
-                                <i class="fa-solid fa-share"></i> Send
-                            </button>
-                        </div>
-                    </div>
-                </div>
-
-            </div>
-
-            <!-- Right Panel: Incoming Feed -->
-            <div class="feed-panel" aria-label="Incoming transfer feed">
-                <div class="feed-header">
-                    <div class="feed-header-left">
-                        <div class="feed-dot" aria-hidden="true"></div>
-                        <h2 class="feed-title">Live Feed</h2>
-                        <span id="feedCount" class="feed-count" aria-label="Feed item count">0</span>
-                    </div>
-                    <button onclick="clearFeed()" class="btn-clear" aria-label="Clear all feed items">
-                        <i class="fa-regular fa-trash-can"></i> Clear
-                    </button>
-                </div>
-
-                <!-- Feed Container -->
-                <div id="feedContainer" role="log" aria-live="polite" aria-label="Received files and text">
-                    <!-- Empty State -->
-                    <div id="emptyState" class="empty-state">
-                        <div class="empty-state-icon" aria-hidden="true">
-                            <i class="fa-solid fa-satellite-dish"></i>
-                        </div>
-                        <h3 class="empty-state-title">Waiting for incoming drops…</h3>
-                        <p class="empty-state-desc">Connect a peer device using the 4-digit code above. Files and text they send appear here instantly.</p>
-                    </div>
-                </div>
-
-                <!-- Retry Overlay -->
-                <div id="retryOverlay" class="retry-overlay" role="alert">
-                    <div class="retry-icon" aria-hidden="true"><i class="fa-solid fa-rotate-right"></i></div>
-                    <p class="retry-text">Connection lost or peer disconnected. Enter the peer code and reconnect.</p>
-                    <button onclick="handleRetry()" class="btn-retry">
-                        <i class="fa-solid fa-plug"></i> Reconnect
-                    </button>
-                </div>
-            </div>
-
-        </section>
-
-    </main>
-
-    <!-- Footer -->
-    <footer>
-        <p>AirFlux runs 100% in your browser — zero servers, zero storage, complete privacy.</p>
-        <p class="footer-credit">Made by <a href="https://github.com/rudra-th/" target="_blank" rel="noopener noreferrer">Rudra <i class="fa-brands fa-github"></i></a></p>
-    </footer>
-
-    <!-- Application Script -->
-    <script src="app.js"></script>
+<script src="app.js"></script>
 </body>
 </html>
