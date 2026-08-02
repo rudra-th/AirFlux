@@ -206,9 +206,11 @@ function setupConnection(connection) {
         peerRetryCount = 0;
         hideRetryOverlay();
         const code = conn.peer.replace(PEER_PREFIX, '');
-        updateStatus('connected', `Connected (${code})`);
+        updateStatus('connected', `Connected · ${code}`);
         showToast(`Direct P2P link established with ${code}`, 'success');
         $joinCodeInput.value = '';
+        // Visual accent on the code card to signal active connection
+        document.querySelector('.my-code-card')?.classList.add('is-connected');
 
         const ids = Object.keys(pendingTransfers);
         if (ids.length) resumePendingTransfers(ids);
@@ -217,9 +219,10 @@ function setupConnection(connection) {
     conn.on('data', handleIncomingData);
 
     conn.on('close', () => {
-        updateStatus('disconnected', 'Peer disconnected');
+        updateStatus('disconnected', 'Not connected');
         showToast('Peer disconnected.', 'warning');
         conn = null;
+        document.querySelector('.my-code-card')?.classList.remove('is-connected');
         showRetryOverlay();
     });
 
@@ -262,6 +265,7 @@ function handleIncomingData(data) {
 
     case 'text':
         addIncomingTextCard(data.content, data.timestamp);
+        autoSwitchToReceive();
         playNotificationPulse();
         playReceiveSound();
         break;
@@ -302,6 +306,7 @@ function handleIncomingData(data) {
             downloadUrl: null
         };
         addIncomingFileCard(data.fileId, data.name, data.size);
+        autoSwitchToReceive();
         playNotificationPulse();
         if (isResume) showToast(`Receiving: ${data.name}`, 'info');
 
@@ -763,7 +768,10 @@ async function streamToDisk(fileId) {
 // ─── FEED: EMPTY STATE + COUNT ────────────────────────────────────────────────
 function syncFeedMeta() {
     $emptyState.classList.toggle('hidden', feedItemCount > 0);
+    // Keep both the mobile tab badge and desktop badge in sync
     $feedCount.textContent = feedItemCount;
+    const desktop = id('feedCountDesktop');
+    if (desktop) desktop.textContent = feedItemCount;
 }
 
 // Evict oldest card when feed exceeds max to keep DOM bounded
@@ -981,32 +989,37 @@ function finishFileCard(fileId, downloadUrl, name, size, status) {
     }[status] || ['vbadge-dim', 'fa-hard-drive', fmtBytes(size)];
 
     if (wasStreamed) {
+        // Already saved to disk — just show the verification badge
         area.innerHTML = `
             <span class="vbadge ${vb[0]}">
                 <i class="fa-solid ${vb[1]}" aria-hidden="true"></i> ${vb[2]}
+            </span>
+            <span class="vbadge vbadge-dim">
+                <i class="fa-solid fa-hard-drive" aria-hidden="true"></i> Saved to disk
             </span>`;
     } else {
+        // Two clean actions: Download (primary) + Save to Custom Location (secondary)
         const hasDiskApi = typeof window.showSaveFilePicker === 'function';
         area.innerHTML = `
             <span class="vbadge ${vb[0]}">
                 <i class="fa-solid ${vb[1]}" aria-hidden="true"></i> ${vb[2]}
             </span>
-            ${hasDiskApi ? `<button class="btn-action btn-action-ghost" data-disk-save="${fileId}">
-                <i class="fa-solid fa-hard-drive" aria-hidden="true"></i> Save to Disk
-            </button>` : ''}
-            <a href="${downloadUrl}" download="${esc(name)}" class="btn-action btn-action-success">
+            <a href="${downloadUrl}" download="${esc(name)}" class="btn-action btn-action-download">
                 <i class="fa-solid fa-download" aria-hidden="true"></i> Download
-            </a>`;
+            </a>
+            ${hasDiskApi ? `<button class="btn-action btn-action-save" data-disk-save="${fileId}" title="Choose where to save this file">
+                <i class="fa-solid fa-folder-open" aria-hidden="true"></i> Save to…
+            </button>` : ''}`;
 
         area.querySelector('[data-disk-save]')?.addEventListener('click', () =>
             streamToDisk(fileId));
 
-        // Revoke blob URL when user clicks Download (browser will have started the save)
+        // Revoke blob URL after download starts (10 s grace)
         area.querySelector('a[download]')?.addEventListener('click', () => {
             setTimeout(() => {
                 URL.revokeObjectURL(downloadUrl);
                 blobUrlRegistry = blobUrlRegistry.filter(u => u !== downloadUrl);
-            }, 10000); // 10 s grace period for the download to start
+            }, 10000);
         });
     }
 }
@@ -1273,3 +1286,55 @@ async function computeFileHash(blob) {
 function hexOf(u8) {
     return Array.from(u8).map(b => b.toString(16).padStart(2, '0')).join('');
 }
+
+// ─── MOBILE TAB SWITCHING ─────────────────────────────────────────────────────
+function switchTab(tab) {
+    const sendPanel    = id('panel-send');
+    const receivePanel = id('panel-receive');
+    const tabSend      = id('tab-send');
+    const tabReceive   = id('tab-receive');
+    if (!sendPanel || !receivePanel) return;
+
+    if (tab === 'send') {
+        sendPanel.classList.remove('tab-hidden');
+        receivePanel.classList.add('tab-hidden');
+        tabSend?.classList.add('active');
+        tabSend?.setAttribute('aria-selected', 'true');
+        tabReceive?.classList.remove('active');
+        tabReceive?.setAttribute('aria-selected', 'false');
+    } else {
+        receivePanel.classList.remove('tab-hidden');
+        sendPanel.classList.add('tab-hidden');
+        tabReceive?.classList.add('active');
+        tabReceive?.setAttribute('aria-selected', 'true');
+        tabSend?.classList.remove('active');
+        tabSend?.setAttribute('aria-selected', 'false');
+    }
+}
+
+// Auto-switch to Received tab when a new item arrives on mobile
+function autoSwitchToReceive() {
+    const isMobile = window.matchMedia('(max-width: 1023px)').matches;
+    if (!isMobile) return;
+    if (id('tab-receive')?.classList.contains('active')) return;
+    switchTab('receive');
+}
+
+// ─── HOW-IT-WORKS STRIP ───────────────────────────────────────────────────────
+const HOW_STRIP_KEY = 'airflux-how-dismissed';
+
+function dismissHowStrip() {
+    const strip = id('howStrip');
+    if (!strip) return;
+    strip.classList.add('dismissed');
+    try { localStorage.setItem(HOW_STRIP_KEY, '1'); } catch (_) {}
+}
+
+(function initHowStrip() {
+    try {
+        if (localStorage.getItem(HOW_STRIP_KEY)) {
+            const strip = id('howStrip');
+            if (strip) strip.classList.add('dismissed');
+        }
+    } catch (_) {}
+})();

@@ -1,49 +1,96 @@
 # AirFlux
 
-Ephemeral peer-to-peer file and text sharing over WebRTC. No servers, no storage, complete privacy.
+**Browser-to-browser file and text transfer. No accounts, no uploads, no servers in the middle.**
 
-## How It Works
+🔗 **Live:** [airflux.netlify.app](https://airflux.netlify.app)
 
-1. Open the page on Device A — you get a 4-digit room code
-2. Share the code (or scan the QR) from Device B
-3. A direct WebRTC data channel is established between browsers
-4. Send files of any size or text/URLs — all data flows browser-to-browser
+---
+
+## What it does
+
+AirFlux creates a direct WebRTC data channel between two browsers. You get a 4-digit code — the other person enters it — and files or text flow straight from one device to the other, without touching any server.
+
+Useful for: sending a file between your phone and laptop, sharing a link without a messaging app, transferring something quickly without cloud storage.
+
+---
+
+## How to use
+
+1. Open [airflux.netlify.app](https://airflux.netlify.app) on both devices
+2. Device A shares its 4-digit code (or the other person scans the QR)
+3. Device B enters the code and hits Connect
+4. Drop files or paste text — transfers start immediately
+
+Or share a direct join link: `https://airflux.netlify.app/#join=XXXX`
+
+---
 
 ## Features
 
-- **P2P File Transfer** — chunked at 64 KB, streamed over WebRTC data channels
-- **P2P Text/URL Bridge** — instant clipboard-style messages
-- **QR Code Pairing** — scan to connect, no typing needed
-- **SHA-256 Integrity Verification** — every file transfer is verified after completion
-- **Save to Disk** — uses the File System Access API to stream large files directly to disk (Chromium)
-- **Auto-Join via URL** — share a `#join=XXXX` link for instant connection
-- **No Servers** — signaling uses PeerJS public server only for initial handshake; all data is direct P2P
+- **P2P file transfer** — chunked at 256 KB, streamed over WebRTC data channels with backpressure control
+- **Text & URL bridge** — instant clipboard between devices
+- **SHA-256 integrity check** — every file is verified after transfer
+- **QR code pairing** — scan to open and auto-join, no typing needed
+- **Direct-to-disk streaming** — large files (100 MB+) stream directly to disk via the File System Access API, bypassing RAM (Chrome/Edge)
+- **Auto-join via URL** — `#join=XXXX` opens and connects in one tap
+- **Resume on reconnect** — interrupted transfers pick up where they left off
+- **Zero dependencies at runtime** — PeerJS (signaling only), no frameworks, no build step
 
-## Project Structure
+---
 
-```
-index.html   — HTML structure
-styles.css   — Custom CSS (zero runtime dependencies)
-app.js       — Application logic & WebRTC engine
-```
+## Privacy
 
-## Running Locally
+- No accounts, no sign-in
+- Files never touch a server — data flows browser-to-browser over WebRTC
+- PeerJS public broker is used only for the initial handshake (exchanging connection info). Once connected, it's out of the picture
+- No analytics, no tracking, no ads
+
+---
+
+## Running locally
 
 ```bash
-# Option 1: any static file server
+# Requires only a static file server
 npx serve .
 
-# Option 2: live reload for development
+# Or with live reload
 npx live-server --port=3000
 ```
 
-## Security
+No build step, no npm install, no bundler.
 
-- Links are validated to only allow `http://` and `https://` protocols (XSS prevention)
-- All received content is HTML-escaped before rendering
-- Clipboard operations include error handling for permission denial
-- SHA-256 hashes verify file integrity after transfer
+---
+
+## Project structure
+
+```
+index.html   — markup and layout
+styles.css   — all styles, zero runtime CSS dependencies
+app.js       — WebRTC engine, file chunking, UI logic
+```
+
+---
+
+## Browser support
+
+| Feature | Chrome | Firefox | Safari | Chrome Android |
+|---|---|---|---|---|
+| WebRTC / P2P | ✅ | ✅ | ✅ | ✅ |
+| Direct-to-disk (File System Access API) | ✅ | ❌ | ❌ | ✅ |
+| QR scanning (native camera) | ✅ | ✅ | ✅ | ✅ |
+
+Firefox and Safari fall back gracefully — files download to the browser's default location instead of streaming to a custom path.
+
+---
+
+## Known limitations
+
+- Both devices must be reachable via STUN (works on most home/mobile networks; may fail on strict corporate/university NATs with no TURN fallback)
+- PeerJS public signaling server has no uptime SLA — connection setup can occasionally fail if it's down
+- No TURN relay, so truly symmetric NATs on both ends can't connect
+
+---
 
 ## License
 
-MIT
+MIT — built by [Rudra](https://github.com/rudra-th/)

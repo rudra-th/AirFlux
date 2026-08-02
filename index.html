@@ -33,7 +33,7 @@
       <i class="fa-solid fa-xmark" aria-hidden="true"></i>
     </button>
     <h3 class="qr-title" id="qrTitle">Scan to Connect</h3>
-    <p class="qr-sub">Point any camera at this QR code to join instantly.</p>
+    <p class="qr-sub">Point any camera at this QR code to open AirFlux and join instantly.</p>
     <div class="qr-box" id="qrcode"></div>
     <div class="qr-url">
       <span class="qr-url-text" id="shareUrlText">Generating…</span>
@@ -52,16 +52,51 @@
         <i class="fa-solid fa-bolt-lightning"></i>
       </div>
       <span class="brand-name">AirFlux</span>
-      <span class="brand-tag">WebRTC</span>
     </div>
-    <div id="statusPill" class="status-pill disconnected" role="status" aria-live="polite">
-      <span id="statusDot" class="status-dot disconnected" aria-hidden="true"></span>
-      <span id="statusText">Disconnected</span>
+    <a href="https://github.com/rudra-th/" target="_blank" rel="noopener noreferrer" class="header-credit" aria-label="Built by Rudra — view on GitHub">
+      by Rudra <i class="fa-brands fa-github" aria-hidden="true"></i>
+    </a>
+    <!-- Connection banner — shown prominently when connected -->
+    <div id="connectionBanner" class="connection-banner" aria-live="polite">
+      <div id="statusPill" class="status-pill disconnected" role="status">
+        <span id="statusDot" class="status-dot disconnected" aria-hidden="true"></span>
+        <span id="statusText">Not connected</span>
+      </div>
     </div>
   </div>
 </header>
 
 <main>
+
+  <!-- ── How it works strip (first-run guide) ── -->
+  <div class="how-strip" id="howStrip" aria-label="How to use AirFlux">
+    <div class="how-step">
+      <div class="how-num" aria-hidden="true">1</div>
+      <div class="how-text">
+        <strong>Share your code</strong>
+        <span>Send your 4-digit code or QR to the other person</span>
+      </div>
+    </div>
+    <div class="how-divider" aria-hidden="true"><i class="fa-solid fa-chevron-right"></i></div>
+    <div class="how-step">
+      <div class="how-num" aria-hidden="true">2</div>
+      <div class="how-text">
+        <strong>They enter it</strong>
+        <span>A direct browser-to-browser link is established</span>
+      </div>
+    </div>
+    <div class="how-divider" aria-hidden="true"><i class="fa-solid fa-chevron-right"></i></div>
+    <div class="how-step">
+      <div class="how-num" aria-hidden="true">3</div>
+      <div class="how-text">
+        <strong>Transfer freely</strong>
+        <span>Files and text flow directly — no servers, no storage</span>
+      </div>
+    </div>
+    <button class="how-dismiss" onclick="dismissHowStrip()" aria-label="Dismiss guide">
+      <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+    </button>
+  </div>
 
   <!-- ── Connection Hub ── -->
   <section class="connection-hub" aria-label="Connection setup">
@@ -70,12 +105,12 @@
     <div class="my-code-card">
       <div class="code-card-top">
         <div>
-          <span class="code-card-label">Your Room Code</span>
-          <p class="code-card-sub">Share with the other device to connect</p>
+          <span class="code-card-label">Your Code</span>
+          <p class="code-card-sub">Share this with the other device</p>
         </div>
-        <button class="btn-ghost" onclick="openQrModal()" aria-label="Show QR code">
-          <i class="fa-solid fa-qrcode" aria-hidden="true" style="color:var(--c-green-hi)"></i>
-          QR
+        <button class="btn-qr" onclick="openQrModal()" aria-label="Show QR code">
+          <i class="fa-solid fa-qrcode" aria-hidden="true"></i>
+          <span>QR</span>
         </button>
       </div>
       <div class="code-display">
@@ -93,7 +128,7 @@
     <div class="card join-card">
       <div>
         <span class="join-label">Connect to Peer</span>
-        <p class="join-sub">Enter the 4-digit code shown on the other device</p>
+        <p class="join-sub">Enter the 4-digit code from the other device</p>
       </div>
       <form id="joinForm" onsubmit="handleJoin(event)" class="join-form">
         <div class="join-input-wrap">
@@ -104,7 +139,7 @@
             type="text"
             id="joinCodeInput"
             maxlength="4"
-            placeholder="4-digit code"
+            placeholder="1234"
             autocomplete="off"
             inputmode="numeric"
             pattern="[0-9]{4}"
@@ -124,8 +159,20 @@
   <!-- ── Workspace ── -->
   <section class="workspace" aria-label="Transfer workspace">
 
+    <!-- Mobile tab bar — only shown on small screens -->
+    <div class="tab-bar" role="tablist" aria-label="Send or receive">
+      <button class="tab-btn active" id="tab-send" role="tab" aria-selected="true" aria-controls="panel-send" onclick="switchTab('send')">
+        <i class="fa-solid fa-paper-plane" aria-hidden="true"></i> Send
+      </button>
+      <button class="tab-btn" id="tab-receive" role="tab" aria-selected="false" aria-controls="panel-receive" onclick="switchTab('receive')">
+        <i class="fa-solid fa-inbox" aria-hidden="true"></i>
+        Received
+        <span id="feedCount" class="tab-badge" aria-label="Number of items received">0</span>
+      </button>
+    </div>
+
     <!-- Left: Send panel -->
-    <div class="workspace-left">
+    <div class="workspace-left" id="panel-send" role="tabpanel" aria-labelledby="tab-send">
 
       <!-- File drop -->
       <div class="card">
@@ -142,7 +189,7 @@
           class="dropzone"
           role="button"
           tabindex="0"
-          aria-label="Drop files here or click to browse"
+          aria-label="Tap to pick files, or drop files here"
           onclick="document.getElementById('fileInput').click()"
           onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();document.getElementById('fileInput').click()}"
         >
@@ -152,8 +199,8 @@
             <div class="dropzone-icon-wrap" aria-hidden="true">
               <i class="fa-solid fa-cloud-arrow-up"></i>
             </div>
-            <p class="dropzone-label">Drop files here or click to browse</p>
-            <p class="dropzone-hint">Multiple files · Direct P2P stream · No size limit on Chrome</p>
+            <p class="dropzone-label">Tap to pick files</p>
+            <p class="dropzone-hint">Or drag &amp; drop · Multiple files · No size limit on Chrome</p>
           </div>
 
           <div id="selectedFileState" class="file-queue hidden">
@@ -166,7 +213,7 @@
             </div>
             <button type="button" id="sendFilesBtn" class="btn-send-file" onclick="sendAllFiles(event)">
               <i class="fa-solid fa-paper-plane" aria-hidden="true"></i>
-              Stream to Peer
+              Send to Peer
             </button>
           </div>
         </div>
@@ -185,7 +232,7 @@
           id="textInput"
           class="text-pad"
           rows="4"
-          placeholder="Paste a URL, code snippet, or note… Enter to send"
+          placeholder="Paste a URL, snippet, or note…"
           aria-label="Text or URL to send to peer"
           spellcheck="false"
         ></textarea>
@@ -200,12 +247,13 @@
     </div>
 
     <!-- Right: Live feed -->
-    <div class="feed-panel" aria-label="Received transfers">
+    <div class="feed-panel" id="panel-receive" role="tabpanel" aria-labelledby="tab-receive" aria-label="Received transfers">
       <div class="feed-header">
         <div class="feed-header-left">
           <div class="feed-live-dot" aria-hidden="true"></div>
-          <h2 class="feed-title">Live Feed</h2>
-          <span id="feedCount" class="feed-count" aria-label="Number of items received">0</span>
+          <h2 class="feed-title">Received</h2>
+          <!-- feedCount is in the tab bar on mobile; this is the desktop count -->
+          <span id="feedCountDesktop" class="feed-count" aria-label="Number of items received">0</span>
         </div>
         <button class="btn-clear-feed" onclick="clearFeed()" aria-label="Clear all feed items">
           <i class="fa-regular fa-trash-can" aria-hidden="true"></i> Clear
@@ -215,10 +263,10 @@
       <div id="feedContainer" role="log" aria-live="polite" aria-label="Transfer feed">
         <div id="emptyState" class="empty-state">
           <div class="empty-icon" aria-hidden="true">
-            <i class="fa-solid fa-satellite-dish"></i>
+            <i class="fa-solid fa-arrow-down-to-line"></i>
           </div>
-          <p class="empty-title">Waiting for drops…</p>
-          <p class="empty-desc">Connect a device using the code above. Files and text will appear here instantly.</p>
+          <p class="empty-title">Nothing received yet</p>
+          <p class="empty-desc">Connect a device and send files or text — they'll appear here instantly, directly from their browser.</p>
         </div>
       </div>
 
@@ -237,12 +285,12 @@
 </main>
 
 <footer>
-  <p>AirFlux transfers data directly between browsers — zero servers, zero storage, zero tracking.</p>
-  <p class="footer-credit">
-    Built by <a href="https://github.com/rudra-th/" target="_blank" rel="noopener noreferrer">
-      Rudra <i class="fa-brands fa-github" aria-hidden="true"></i>
-    </a>
-  </p>
+  <div class="footer-trust">
+    <span><i class="fa-solid fa-shield-halved" aria-hidden="true"></i> No servers</span>
+    <span><i class="fa-solid fa-database-slash" aria-hidden="true" style="font-size:0.75em"></i> No storage</span>
+    <span><i class="fa-solid fa-eye-slash" aria-hidden="true"></i> No tracking</span>
+  </div>
+
 </footer>
 
 <script src="app.js"></script>
