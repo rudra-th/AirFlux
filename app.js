@@ -121,7 +121,7 @@ function setupPasteToSend() {
 }
 
 // ─── RAW-MODE FRAMING ────────────────────────────────────────────────────────
-// With serialization:'raw', PeerJS sends ArrayBuffers natively with zero wrapping.
+// With serialization:'none', PeerJS sends ArrayBuffers natively with zero wrapping.
 // We need to distinguish control messages (JSON) from file chunks (binary).
 // Protocol: every message is an ArrayBuffer.
 //   - If byte[0] === 0x01 → control message: remaining bytes are UTF-8 JSON
@@ -206,7 +206,7 @@ function initPeer(customCode = null) {
 
     peer.on('connection', (incoming) => {
         if (conn && conn.open) { incoming.close(); return; }
-        // Note: the initiator sets serialization:'raw' — the receiver inherits it
+        // Note: the initiator sets serialization:'none' — the receiver inherits it
         // automatically from the data channel negotiation. No need to set it here,
         // but we document it explicitly so future readers aren't confused.
         setupConnection(incoming);
@@ -256,10 +256,10 @@ function handleJoin(e) {
 
     updateStatus('connecting', 'Connecting…');
     hideRetryOverlay();
-    // 'raw' skips PeerJS's JSON/binary envelope entirely — ArrayBuffers are sent
+    // 'none' skips PeerJS's JSON/binary envelope entirely — ArrayBuffers are sent
     // as-is over the RTCDataChannel. This alone gives 3-5x throughput improvement
     // vs the default 'binary' mode which base64-encodes every chunk.
-    const out = peer.connect(PEER_PREFIX + code, { reliable: true, serialization: 'raw' });
+    const out = peer.connect(PEER_PREFIX + code, { reliable: true, serialization: 'none' });
     setupConnection(out);
 
     connectionTimeout = setTimeout(() => {
@@ -959,7 +959,7 @@ function addIncomingTextCard(content, timestamp) {
 
     const isUrl = validUrl(content);
     const card  = document.createElement('div');
-    card.className = 'feed-card feed-in';
+    card.className = 'feed-card';
 
     // Use data attributes for copy/open to avoid inline onclick XSS risk
     card.innerHTML = `
