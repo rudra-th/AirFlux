@@ -54,7 +54,7 @@
       <span class="brand-name">AirFlux</span>
     </div>
     <a href="https://github.com/rudra-th/" target="_blank" rel="noopener noreferrer" class="header-credit" aria-label="Built by Rudra — view on GitHub">
-      by Rudra <i class="fa-brands fa-github" aria-hidden="true"></i>
+      <span class="header-credit-text">by Rudra</span> <i class="fa-brands fa-github" aria-hidden="true"></i>
     </a>
     <!-- Connection banner — shown prominently when connected -->
     <div id="connectionBanner" class="connection-banner" aria-live="polite">
@@ -207,9 +207,14 @@
             <div id="fileList" class="file-list"></div>
             <div class="file-queue-footer">
               <span id="fileListSummary" class="file-queue-summary"></span>
-              <button type="button" class="btn-clear-file" onclick="clearAllFiles(event)">
-                <i class="fa-solid fa-xmark" aria-hidden="true"></i> Clear all
-              </button>
+              <div class="file-queue-footer-actions">
+                <button type="button" class="btn-clear-file" onclick="event.stopPropagation(); document.getElementById('fileInput').click()">
+                  <i class="fa-solid fa-plus" aria-hidden="true"></i> Add more
+                </button>
+                <button type="button" class="btn-clear-file" onclick="clearAllFiles(event)">
+                  <i class="fa-solid fa-xmark" aria-hidden="true"></i> Clear all
+                </button>
+              </div>
             </div>
             <button type="button" id="sendFilesBtn" class="btn-send-file" onclick="sendAllFiles(event)">
               <i class="fa-solid fa-paper-plane" aria-hidden="true"></i>

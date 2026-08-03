@@ -28,6 +28,11 @@ const FEED_MAX_CARDS      = 100;
 // Auto-prompt disk streaming for files above this size (100 MB) to avoid
 // loading the entire file into RAM — important on phones with limited memory.
 const LARGE_FILE_THRESHOLD = 100 * 1024 * 1024;
+// How long file-end will wait for the user to respond to the save-location
+// picker before giving up and falling back to in-RAM assembly. Raw-mode
+// transfers can finish large files faster than a user can click through a
+// native dialog, so this closes that race rather than buffering silently.
+const DISK_DECISION_TIMEOUT_MS = 8000;
 // Largest file hashable via fallback path (no DigestStream)
 const HASH_FALLBACK_MAX   = 256 * 1024 * 1024; // 256 MB
 const HASH_SLICE          = 4  * 1024 * 1024;  // 4 MB per slice
@@ -328,6 +333,97 @@ function updateStatus(state, text) {
     $statusDot.className    = 'status-dot '  + state;
 }
 
+// ─── FILE-END: ASSEMBLE OR FINALIZE DISK STREAM ─────────────────────────────
+// Handles the moment a transfer's last chunk arrives. For files that
+// auto-triggered the save-location picker, this waits briefly for the user's
+// decision instead of racing ahead and silently buffering the whole file in
+// RAM — raw-mode transfers can now outrun a user clicking through a native
+// dialog, so this closes that gap rather than defeating the disk-stream
+// feature it was built to support.
+async function handleFileEnd(fileId, fo) {
+    // If the user hasn't answered the save picker yet but might still (i.e.
+    // it auto-opened for this file and hasn't resolved), give it a bounded
+    // window rather than assembling into RAM immediately.
+    if (fo.isLargeAutoDisk && !fo.diskWritable && fo.diskDecisionPromise) {
+        showToast(`Finishing ${fo.name} — waiting for you to choose a save location…`, 'info');
+        await Promise.race([
+            fo.diskDecisionPromise,
+            new Promise(resolve => setTimeout(() => resolve('timeout'), DISK_DECISION_TIMEOUT_MS))
+        ]);
+        // fo is the same object reference — diskWritable will now be set if
+        // the user picked a location in time, whether via the timeout race
+        // above or the promise resolving first.
+    }
+
+    if (fo.diskWritable) {
+        fo.pendingDiskWrite.then(async () => {
+            try { await fo.diskWritable.close(); } catch (_) {}
+            showDiskSaveComplete(fileId);
+        });
+        finishFileCard(fileId, null, fo.name, fo.size, 'pending');
+    } else {
+        // Either a normal file, or a large file where the user never
+        // responded to the picker in time — falls back to in-RAM assembly.
+        if (fo.isLargeAutoDisk) {
+            showToast(`${fo.name} didn't get a save location in time — kept in memory instead.`, 'warning');
+        }
+        // Assemble in index order — chunks may have arrived out of order
+        const sorted = Array.from(fo.buffers.entries())
+            .sort((a, b) => a[0] - b[0])
+            .map(([, buf]) => buf)
+            .filter(Boolean);
+        const blob = new Blob(sorted, { type: fo.fileType });
+        const url  = URL.createObjectURL(blob);
+        fo.assembledBlob = blob;
+        fo.downloadUrl   = url;
+        blobUrlRegistry.push(url);
+        finishFileCard(fileId, url, fo.name, fo.size, 'pending');
+    }
+    showToast(`Received: ${fo.name} — verifying…`, 'info');
+    playReceiveSound();
+    sendCtrl({ type: 'file-ack', fileId, lastChunkIndex: fo.totalChunks - 1 });
+}
+
+// ─── FILE-HASH: VERIFY AFTER FINALIZATION ───────────────────────────────────
+// Waits for handleFileEnd() to finish (including any disk-decision wait)
+// before checking assembledBlob — otherwise a still-finalizing large file
+// would look "not ready" here and get its state deleted out from under it.
+//
+// Note: this no longer deletes incomingFiles[fileId] on completion. Doing so
+// used to make the post-completion "Save to…" button silently non-functional,
+// since it reads fo.assembledBlob from that same map. The entry is now kept
+// until the card is evicted from the feed or the feed is cleared (both of
+// which properly clean up incomingFiles alongside the DOM/blob cleanup).
+async function finalizeAndVerify(data, fo) {
+    if (fo.finalizePromise) await fo.finalizePromise;
+
+    if (fo.diskWritable) {
+        // Cannot re-read from disk — trust the transfer
+        finishFileCard(data.fileId, null, fo.name, fo.size, 'verified');
+        showToast(`Saved & verified: ${fo.name}`, 'success');
+        fo.completed = true;
+        return;
+    }
+
+    const blob = fo.assembledBlob;
+    if (!blob) { fo.completed = true; return; }
+
+    const localHash = await computeFileHash(blob);
+    let status;
+    if (localHash === null || data.hash === null) status = 'unverified';
+    else if (localHash === data.hash)             status = 'verified';
+    else                                           status = 'mismatch';
+
+    finishFileCard(data.fileId, fo.downloadUrl, fo.name, fo.size, status);
+    const msgs = {
+        verified:   `Integrity verified: ${fo.name}`,
+        mismatch:   `Hash mismatch — ${fo.name} may be corrupted`,
+        unverified: `${fo.name} received (file too large for checksum)`
+    };
+    showToast(msgs[status], status === 'verified' ? 'success' : status === 'mismatch' ? 'warning' : 'info');
+    fo.completed = true;
+}
+
 // ─── INCOMING DATA HANDLER ───────────────────────────────────────────────────
 function handleIncomingData(rawData) {
     // In raw serialization mode every message arrives as an ArrayBuffer.
@@ -377,7 +473,13 @@ function handleIncomingData(rawData) {
             pendingDiskChunks: [],
             pendingDiskWrite: Promise.resolve(),
             assembledBlob: null,
-            downloadUrl: null
+            downloadUrl: null,
+            // Large-file race guard: if this file auto-triggers the save picker,
+            // file-end will wait briefly for the user's decision before falling
+            // back to full in-RAM assembly. See handleFileEnd().
+            isLargeAutoDisk: false,
+            diskDecisionResolve: null,
+            diskDecisionPromise: null
         };
         addIncomingFileCard(data.fileId, data.name, data.size);
         autoSwitchToReceive();
@@ -388,7 +490,16 @@ function handleIncomingData(rawData) {
         // file isn't held in RAM (critical on phones). The picker opens now
         // while chunks stream in the background; already-received chunks are
         // drained to disk once the user picks a location.
+        //
+        // Raw-mode transfers can now finish a 100 MB file in seconds — faster
+        // than a user can realistically respond to the native save dialog. So
+        // we track the decision with a resolvable promise: handleFileEnd()
+        // waits up to DISK_DECISION_TIMEOUT_MS for the user to answer before
+        // falling back to in-RAM assembly, instead of racing ahead blindly.
         if (data.size >= LARGE_FILE_THRESHOLD && typeof window.showSaveFilePicker === 'function') {
+            const fo = incomingFiles[data.fileId];
+            fo.isLargeAutoDisk = true;
+            fo.diskDecisionPromise = new Promise(resolve => { fo.diskDecisionResolve = resolve; });
             showToast(`Large file (${fmtBytes(data.size)}) — choose where to save it now to stream directly to disk.`, 'info');
             // Small delay so the card renders first, then open picker
             setTimeout(() => startStreamToDisk(data.fileId), 300);
@@ -456,62 +567,19 @@ function handleIncomingData(rawData) {
     case 'file-end': {
         const fo = incomingFiles[data.fileId];
         if (!fo) return;
-
-        if (fo.diskWritable) {
-            fo.pendingDiskWrite.then(async () => {
-                try { await fo.diskWritable.close(); } catch (_) {}
-                showDiskSaveComplete(data.fileId);
-            });
-            finishFileCard(data.fileId, null, fo.name, fo.size, 'pending');
-        } else {
-            // Assemble in index order — chunks may have arrived out of order
-            const sorted = Array.from(fo.buffers.entries())
-                .sort((a, b) => a[0] - b[0])
-                .map(([, buf]) => buf)
-                .filter(Boolean);
-            const blob = new Blob(sorted, { type: fo.fileType });
-            const url  = URL.createObjectURL(blob);
-            fo.assembledBlob = blob;
-            fo.downloadUrl   = url;
-            blobUrlRegistry.push(url);
-            finishFileCard(data.fileId, url, fo.name, fo.size, 'pending');
-        }
-        showToast(`Received: ${fo.name} — verifying…`, 'info');
-        playReceiveSound();
-        sendCtrl({ type: 'file-ack', fileId: data.fileId, lastChunkIndex: fo.totalChunks - 1 });
+        // Store the promise so file-hash (which can arrive moments later) can
+        // wait for it — otherwise a large auto-disk file still waiting on its
+        // save-location decision would look "not assembled yet" to file-hash
+        // and get deleted prematurely. See handleFileEnd() for the race this
+        // guards against.
+        fo.finalizePromise = handleFileEnd(data.fileId, fo);
         break;
     }
 
     case 'file-hash': {
         const fo = incomingFiles[data.fileId];
         if (!fo) return;
-
-        if (fo.diskWritable) {
-            // Cannot re-read from disk — trust the transfer
-            finishFileCard(data.fileId, null, fo.name, fo.size, 'verified');
-            showToast(`Saved & verified: ${fo.name}`, 'success');
-            delete incomingFiles[data.fileId];
-            return;
-        }
-
-        const blob = fo.assembledBlob;
-        if (!blob) { delete incomingFiles[data.fileId]; return; }
-
-        computeFileHash(blob).then(localHash => {
-            let status;
-            if (localHash === null || data.hash === null) status = 'unverified';
-            else if (localHash === data.hash)             status = 'verified';
-            else                                           status = 'mismatch';
-
-            finishFileCard(data.fileId, fo.downloadUrl, fo.name, fo.size, status);
-            const msgs = {
-                verified:   `Integrity verified: ${fo.name}`,
-                mismatch:   `Hash mismatch — ${fo.name} may be corrupted`,
-                unverified: `${fo.name} received (file too large for checksum)`
-            };
-            showToast(msgs[status], status === 'verified' ? 'success' : status === 'mismatch' ? 'warning' : 'info');
-            delete incomingFiles[data.fileId];
-        });
+        finalizeAndVerify(data, fo);
         break;
     }
 
@@ -740,10 +808,11 @@ function renderFileQueue() {
         </div>
     `).join('');
 
-    // Delegate remove clicks
+    // Delegate remove clicks — stopPropagation is essential here: without it,
+    // the click bubbles to the dropzone's own onclick and reopens the file picker.
     list.onclick = (e) => {
         const btn = e.target.closest('[data-remove-index]');
-        if (btn) removeFile(Number(btn.dataset.removeIndex));
+        if (btn) { e.stopPropagation(); removeFile(Number(btn.dataset.removeIndex)); }
     };
 
     const total = selectedFiles.reduce((s, f) => s + f.size, 0);
@@ -767,7 +836,7 @@ async function sendAllFiles(e) {
         for (const file of files) await sendFileOverWebRTC(file);
     } finally {
         sendingInProgress = false;
-        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-paper-plane"></i> Stream Files Now'; }
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-paper-plane" aria-hidden="true"></i> Send to Peer'; }
     }
 }
 
@@ -810,8 +879,13 @@ async function startStreamToDisk(fileId) {
 
         fo.diskReady = true;
         showToast('Streaming to disk…', 'info');
+        // Unblock handleFileEnd() if it's waiting on this decision
+        if (fo.diskDecisionResolve) { fo.diskDecisionResolve('disk'); fo.diskDecisionResolve = null; }
     } catch (err) {
         if (err.name !== 'AbortError') showToast('Could not open save dialog.', 'error');
+        // User cancelled or the picker failed — resolve immediately so
+        // handleFileEnd() doesn't wait out the full timeout for nothing.
+        if (fo.diskDecisionResolve) { fo.diskDecisionResolve('cancelled'); fo.diskDecisionResolve = null; }
     }
 }
 
@@ -865,6 +939,12 @@ function evictOldestCard() {
                 URL.revokeObjectURL(href);
                 blobUrlRegistry = blobUrlRegistry.filter(u => u !== href);
             }
+        }
+        // File cards keep their incomingFiles[fileId] entry alive after
+        // completion now (so the post-completion Save button still works) —
+        // clean it up here instead, once the card actually leaves the feed.
+        if (oldest.id && oldest.id.startsWith('file-card-')) {
+            delete incomingFiles[oldest.id.slice('file-card-'.length)];
         }
         $feedContainer.removeChild(oldest);
         feedItemCount--;
@@ -1119,11 +1199,10 @@ function clearFeed() {
     for (const url of blobUrlRegistry) URL.revokeObjectURL(url);
     blobUrlRegistry = [];
 
-    // Clear assembledBlob refs from completed transfers
-    for (const fo of Object.values(incomingFiles)) {
-        fo.assembledBlob = null;
-        fo.downloadUrl   = null;
-    }
+    // incomingFiles entries now persist after completion (so the post-completion
+    // Save button keeps working) — clearing the whole feed is the point where
+    // they finally get released, since no card references them anymore.
+    incomingFiles = {};
 
     syncFeedMeta();
     showToast('Feed cleared.', 'info');
