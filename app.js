@@ -59,6 +59,13 @@ let $feedCount, $dropzone, $dropzonePrompt, $selectedFileState, $retryOverlay;
 // Reusable escapeHtml element — created once, never appended to DOM
 const _escEl = document.createElement('span');
 
+// ─── CODEC SINGLETONS ───────────────────────────────────────────────────────
+// TextEncoder / TextDecoder are stateless; a single instance is safe to
+// reuse across all call sites. Eliminates repeated instantiation on the hot
+// path (sendCtrl, sendChunk, decodeRawMessage — called per chunk).
+const _enc = new TextEncoder();
+const _dec = new TextDecoder();
+
 // ─── AudioContext singleton ─────────────────────────────────────────────────
 let _audioCtx = null;
 function getAudioCtx() {
@@ -139,22 +146,33 @@ const CHUNK_HEADER_SIZE = 1 + 4 + FILEID_LEN; // tag + chunkIndex + fileId
 
 function sendCtrl(obj) {
     const json   = JSON.stringify(obj);
-    const enc    = new TextEncoder().encode(json);
+    const enc    = _enc.encode(json);          // reuse singleton — no per-call allocation
     const buf    = new Uint8Array(1 + enc.byteLength);
     buf[0]       = CTRL_TAG;
     buf.set(enc, 1);
     conn.send(buf.buffer);
 }
 
-function sendChunk(fileId, chunkIndex, data) {
-    const idEnc  = new TextEncoder().encode(fileId.padEnd(FILEID_LEN, '\0'));
-    const buf    = new Uint8Array(CHUNK_HEADER_SIZE + data.byteLength);
-    const view   = new DataView(buf.buffer);
-    buf[0]       = CHUNK_TAG;
-    view.setUint32(1, chunkIndex, false); // big-endian
-    buf.set(idEnc, 5);
-    buf.set(new Uint8Array(data), CHUNK_HEADER_SIZE);
-    conn.send(buf.buffer);
+// sendChunk — hot-path sender.
+//
+// Accepts pre-encoded fileId bytes and a reusable send buffer that the caller
+// allocates once per transfer (see sendFileOverWebRTC).  Only chunkIndex and
+// the payload change between calls, so we avoid:
+//   • new TextEncoder() + padEnd per chunk
+//   • new Uint8Array(CHUNK_HEADER_SIZE + CHUNK_SIZE) per chunk  (~260 KB alloc)
+//   • subsequent GC pressure from those short-lived large buffers
+//
+// RTCDataChannel.send() copies the ArrayBufferView into its own internal
+// buffer synchronously before returning, so it is safe to reuse sendBuf
+// immediately on the next iteration.
+//
+// sendBuf[0]   = CHUNK_TAG          ← written once before the loop
+// sendBuf[5..] = fileIdEncoded      ← written once before the loop
+// sendView     = DataView(sendBuf.buffer)
+function sendChunk(chunkIndex, data, sendBuf, sendView) {
+    sendView.setUint32(1, chunkIndex, false);                    // big-endian
+    sendBuf.set(new Uint8Array(data), CHUNK_HEADER_SIZE);        // copy payload
+    conn.send(sendBuf.subarray(0, CHUNK_HEADER_SIZE + data.byteLength));
 }
 
 function decodeRawMessage(rawData) {
@@ -164,16 +182,25 @@ function decodeRawMessage(rawData) {
 
     if (tag === CTRL_TAG) {
         try {
-            return JSON.parse(new TextDecoder().decode(u8.slice(1)));
+            // subarray() is a zero-copy view — no 256 B intermediate buffer.
+            return JSON.parse(_dec.decode(u8.subarray(1)));
         } catch (_) { return null; }
     }
 
     if (tag === CHUNK_TAG) {
         const view       = new DataView(rawData);
         const chunkIndex = view.getUint32(1, false);
-        const fileIdRaw  = new TextDecoder().decode(u8.slice(5, 5 + FILEID_LEN));
-        const fileId     = fileIdRaw.replace(/\0+$/, ''); // strip padding
-        const data       = rawData.slice(CHUNK_HEADER_SIZE);
+        // subarray() — view of the 36-byte fileId field, no copy.
+        const fileIdRaw  = _dec.decode(u8.subarray(5, 5 + FILEID_LEN));
+        const fileId     = fileIdRaw.replace(/\0+$/, '');
+        // KEY OPTIMISATION: return a Uint8Array VIEW of the payload instead of
+        // ArrayBuffer.slice(), which would memcpy the entire 256 KB chunk on
+        // every received message.  Callers that store this view (fo.buffers,
+        // pendingDiskChunks) keep rawData alive; this is intentional — we trade
+        // 41 bytes of per-chunk header overhead to eliminate one 256 KB copy on
+        // the hot path.  For a 500 MB file that removes ~500 MB of data movement
+        // from the receiver's main thread.
+        const data = new Uint8Array(rawData, CHUNK_HEADER_SIZE);
         return { type: 'file-chunk', fileId, chunkIndex, data };
     }
 
@@ -186,6 +213,15 @@ function generate4DigitCode() {
 }
 
 function initPeer(customCode = null) {
+    // Destroy the existing peer before creating a new one.
+    // Without this, retries (server-error / network / unavailable-id) leave a
+    // zombie Peer whose event listeners keep firing against shared state, which
+    // can produce duplicate status updates, double-sends, or a second peer.on
+    // handler silently consuming incoming connections.
+    if (peer) {
+        peer.destroy();
+        peer = null;
+    }
     updateStatus('connecting', 'Signaling…');
     my4DigitCode = customCode || generate4DigitCode();
 
@@ -443,6 +479,13 @@ function handleIncomingData(rawData) {
     case 'file-start':
     case 'file-resume': {
         const isResume = data.type === 'file-resume';
+        // If file-resume arrives but we have no state (e.g. the receiver
+        // reloaded and reconnected), we can only assemble a partial file.
+        // Ask the sender to restart from the beginning instead.
+        if (isResume && !incomingFiles[data.fileId]) {
+            sendCtrl({ type: 'file-restart-request', fileId: data.fileId });
+            break;
+        }
         // On resume, preserve existing progress if we already have this transfer
         if (isResume && incomingFiles[data.fileId]) {
             incomingFiles[data.fileId].totalChunks = data.totalChunks;
@@ -522,9 +565,9 @@ function handleIncomingData(rawData) {
 
         if (fo.diskReady && fo.diskWritable) {
             // Live disk stream — chain writes to preserve order
-            const chunkData = data.data;
+            const chunkData = data.data;  // already a Uint8Array view — no wrap needed
             fo.pendingDiskWrite = fo.pendingDiskWrite
-                .then(() => fo.diskWritable.write(new Uint8Array(chunkData)))
+                .then(() => fo.diskWritable.write(chunkData))
                 .catch(() => {});
         } else if (fo.diskWritable && !fo.diskReady) {
             // Picker open but drain not started — queue
@@ -589,6 +632,18 @@ function handleIncomingData(rawData) {
         break;
     }
 
+    case 'file-restart-request': {
+        // Receiver has no state for this transfer (it may have reloaded).
+        // Restart the send from the beginning so the receiver gets a complete file.
+        const p = pendingTransfers[data.fileId];
+        if (p && p.file) {
+            p.lastAckedChunk = -1;
+            showToast(`Restarting: ${p.file.name} (receiver has no partial state)`, 'info');
+            sendFileOverWebRTC(p.file, 0, data.fileId);
+        }
+        break;
+    }
+
     } // end switch
 }
 
@@ -616,6 +671,21 @@ async function sendFileOverWebRTC(file, resumeFrom = 0, existingFileId = null) {
     } else {
         addOutgoingFileCard(fileId, file.name, file.size);
     }
+
+    // ── Per-transfer one-time setup ─────────────────────────────────────────
+    // Encode the fileId once — it never changes across chunks, so encoding it
+    // inside sendChunk would repeat the work totalChunks times (up to 4096×
+    // for a 1 GB file).
+    const fileIdBytes = _enc.encode(fileId.padEnd(FILEID_LEN, '\0'));
+
+    // Pre-allocate a single reusable send buffer (header + max payload).
+    // This eliminates the ~260 KB allocation + GC that the old sendChunk created
+    // on every iteration.  RTCDataChannel.send() copies the view synchronously,
+    // so the buffer is free to overwrite on the very next iteration.
+    const sendBuf  = new Uint8Array(CHUNK_HEADER_SIZE + CHUNK_SIZE);
+    const sendView = new DataView(sendBuf.buffer);
+    sendBuf[0] = CHUNK_TAG;          // constant for the lifetime of this transfer
+    sendBuf.set(fileIdBytes, 5);     // constant for the lifetime of this transfer
 
     // Event-driven backpressure — safely access the underlying RTCDataChannel.
     // PeerJS doesn't guarantee a stable .dataChannel property, so we try several paths.
@@ -670,9 +740,9 @@ async function sendFileOverWebRTC(file, resumeFrom = 0, existingFileId = null) {
         if (dc && dc.bufferedAmount > BACKPRESSURE_HIGH) await waitForDrain();
 
         try {
-            // sendChunk sends raw ArrayBuffer with a tiny binary header —
-            // no JSON serialization, no base64, no PeerJS envelope overhead.
-            sendChunk(fileId, chunkIndex, buffer);
+            // sendChunk writes into the pre-allocated sendBuf (header already
+            // set), then sends a subarray view — no per-chunk allocation.
+            sendChunk(chunkIndex, buffer, sendBuf, sendView);
         } catch (_) {
             showToast('Transfer interrupted — will resume on reconnect.', 'error');
             finishOutgoingFileCard(fileId, '?', 0);
@@ -828,7 +898,7 @@ async function sendAllFiles(e) {
 
     sendingInProgress = true;
     const btn = id('sendFilesBtn');
-    if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+    if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin" aria-hidden="true"></i> Sending…'; }
 
     const files = [...selectedFiles];
     clearAllFiles(null);
@@ -874,7 +944,7 @@ async function startStreamToDisk(fileId) {
 
         fo.pendingDiskWrite = fo.pendingDiskWrite.then(async () => {
             for (const chunk of all)
-                await writable.write(new Uint8Array(chunk.data));
+                await writable.write(chunk.data); // already Uint8Array — no copy needed
         });
 
         fo.diskReady = true;
@@ -929,7 +999,7 @@ function evictOldestCard() {
     if (feedItemCount <= FEED_MAX_CARDS) return;
     // Cards are prepended so the oldest is the last child (before emptyState)
     const children = Array.from($feedContainer.children).filter(c => c !== $emptyState);
-    if (children.length > FEED_MAX_CARDS) {
+    if (children.length >= FEED_MAX_CARDS) {
         const oldest = children[children.length - 1];
         // Revoke any blob URL attached to this card
         const dl = oldest.querySelector('a[download]');
@@ -1374,7 +1444,6 @@ function pct(done, total) { return total > 0 ? Math.round((done / total) * 100) 
 
 function fmtBytes(bytes) {
     if (!bytes || isNaN(bytes) || bytes < 0) return '0 B';
-    if (bytes === 0) return '0 B';
     const k = 1024;
     const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), 4);
     return parseFloat((bytes / k ** i).toFixed(2)) + ' ' + ['B','KB','MB','GB','TB'][i];
