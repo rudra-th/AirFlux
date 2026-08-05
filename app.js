@@ -49,6 +49,7 @@ let fileDomCache          = {};      // fileId → { bar, text } — validated o
 let feedItemCount         = 0;
 let peerRetryCount        = 0;
 let connectionTimeout     = null;
+let signalingTimer        = null;   // fires if signaling server never responds
 let blobUrlRegistry       = [];      // all live blob URLs — revoked on clearFeed
 
 // Cached DOM refs (set after DOMContentLoaded)
@@ -249,7 +250,21 @@ function initPeer(customCode = null) {
         }
     });
 
+    // Hard timeout on signaling connection.
+    // If the server hangs without emitting any error (OS-level TCP timeout,
+    // not a JS-level PeerJS error), the user would wait forever at "Signaling…".
+    // This gives them a clear message and retries after 10 s.
+    if (signalingTimer) clearTimeout(signalingTimer);
+    signalingTimer = setTimeout(() => {
+        signalingTimer = null;
+        if (peer && !peer.open) {
+            showToast('Signaling server not responding — check your connection and retrying…', 'error');
+            initPeer(my4DigitCode); // retry with same code
+        }
+    }, 10000);
+
     peer.on('open', () => {
+        if (signalingTimer) { clearTimeout(signalingTimer); signalingTimer = null; }
         $myRoomCode.textContent = my4DigitCode;
         updateStatus('disconnected', 'Ready for peer');
         generateQRCode();
@@ -289,6 +304,12 @@ function initPeer(customCode = null) {
             showRetryOverlay();
         } else if (err.type === 'network' || err.type === 'server-error') {
             showToast('Signaling server error — retrying…', 'error');
+            setTimeout(() => initPeer(), 3000);
+        } else if (err.type === 'socket-error' || err.type === 'socket-closed') {
+            // WebSocket to signaling server dropped or was refused.
+            // These were previously unhandled, leaving the UI stuck at "Signaling…"
+            // with no feedback and no retry. Treat the same as a server error.
+            showToast('Connection to signaling server lost — retrying…', 'error');
             setTimeout(() => initPeer(), 3000);
         }
     });
