@@ -219,8 +219,23 @@ function initPeer(customCode = null) {
     // can produce duplicate status updates, double-sends, or a second peer.on
     // handler silently consuming incoming connections.
     if (peer) {
-        peer.destroy();
+        // WHY this order matters:
+        // PeerJS destroy() → disconnect() → this.emit('disconnected') is SYNCHRONOUS.
+        // If we called destroy() while `peer` still held the old instance, the
+        // 'disconnected' handler below would fire mid-destroy, see peer === peer1
+        // (destroyed = false at that moment), and call peer1.reconnect() —
+        // reconnecting the very peer we are trying to kill, causing a zombie race
+        // with the new peer and leaving the UI stuck on "Connecting".
+        //
+        // Safe sequence:
+        //   1. Capture stale reference
+        //   2. Null out `peer` first  → any sync/async handler sees null, bails out
+        //   3. removeAllListeners()   → belt-and-suspenders: no handler fires at all
+        //   4. destroy()              → clean socket teardown with no side effects
+        const stale = peer;
         peer = null;
+        stale.removeAllListeners();
+        stale.destroy();
     }
     updateStatus('connecting', 'Signaling…');
     my4DigitCode = customCode || generate4DigitCode();
@@ -279,8 +294,12 @@ function initPeer(customCode = null) {
     });
 
     peer.on('disconnected', () => {
-        updateStatus('disconnected', 'Disconnected');
-        peer.reconnect();
+        // Guard: `peer` may be null if initPeer() already nulled it during a
+        // concurrent retry.  Without this, peer.reconnect() throws a TypeError.
+        if (peer && !peer.destroyed) {
+            updateStatus('disconnected', 'Disconnected');
+            peer.reconnect();
+        }
     });
 }
 
