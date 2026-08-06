@@ -12,6 +12,7 @@ const CHUNK_SIZE          = 256 * 1024;
 const PEER_PREFIX         = 'passcode-airdrop-v1-';
 const MAX_PEER_RETRIES    = 10;
 const CONN_TIMEOUT_MS     = 15000;
+const SIGNALING_TIMEOUT_MS = 10000;
 // 32 reads × 256 KB = 8 MB pre-read pipeline — keeps disk I/O ahead of network.
 // Raw mode is fast enough to drain 4 MB in <100 ms on LAN, so we need a deeper
 // pipeline to ensure the sender never stalls waiting for a slice().arrayBuffer().
@@ -49,7 +50,7 @@ let fileDomCache          = {};      // fileId → { bar, text } — validated o
 let feedItemCount         = 0;
 let peerRetryCount        = 0;
 let connectionTimeout     = null;
-let signalingTimer        = null;   // fires if signaling server never responds
+let signalingTimer        = null;
 let blobUrlRegistry       = [];      // all live blob URLs — revoked on clearFeed
 
 // Cached DOM refs (set after DOMContentLoaded)
@@ -94,6 +95,7 @@ document.addEventListener('DOMContentLoaded', () => {
     setupDragAndDrop();
     setupPasteToSend();
     checkUrlHashForAutoJoin();
+    switchTab('send');
 
     // Close QR modal on backdrop click
     id('qrModal').addEventListener('click', (e) => {
@@ -154,26 +156,26 @@ function sendCtrl(obj) {
     conn.send(buf.buffer);
 }
 
-// sendChunk — hot-path sender.
+// sendChunk — builds a fresh ArrayBuffer per chunk and sends it.
 //
-// Accepts pre-encoded fileId bytes and a reusable send buffer that the caller
-// allocates once per transfer (see sendFileOverWebRTC).  Only chunkIndex and
-// the payload change between calls, so we avoid:
-//   • new TextEncoder() + padEnd per chunk
-//   • new Uint8Array(CHUNK_HEADER_SIZE + CHUNK_SIZE) per chunk  (~260 KB alloc)
-//   • subsequent GC pressure from those short-lived large buffers
+// Accepts pre-encoded fileId bytes (computed once per transfer in
+// sendFileOverWebRTC) to avoid TextEncoder + padEnd on every call.
 //
-// RTCDataChannel.send() copies the ArrayBufferView into its own internal
-// buffer synchronously before returning, so it is safe to reuse sendBuf
-// immediately on the next iteration.
-//
-// sendBuf[0]   = CHUNK_TAG          ← written once before the loop
-// sendBuf[5..] = fileIdEncoded      ← written once before the loop
-// sendView     = DataView(sendBuf.buffer)
-function sendChunk(chunkIndex, data, sendBuf, sendView) {
-    sendView.setUint32(1, chunkIndex, false);                    // big-endian
-    sendBuf.set(new Uint8Array(data), CHUNK_HEADER_SIZE);        // copy payload
-    conn.send(sendBuf.subarray(0, CHUNK_HEADER_SIZE + data.byteLength));
+// We deliberately send buf.buffer (ArrayBuffer) rather than a Uint8Array
+// subarray view.  PeerJS 1.4.x's internal _bufferedSend / _trySend path
+// was written when only ArrayBuffers were commonly passed to dc.send() in
+// serialization:'none' mode.  Sending a Uint8Array view caused the data
+// channel to throw on the first full-sized (256 KB) chunk, disconnecting
+// immediately — while small files whose single chunk is well below 256 KB
+// happened to succeed.
+function sendChunk(chunkIndex, data, fileIdBytes) {
+    const buf  = new Uint8Array(CHUNK_HEADER_SIZE + data.byteLength);
+    const view = new DataView(buf.buffer);
+    buf[0] = CHUNK_TAG;
+    view.setUint32(1, chunkIndex, false);
+    buf.set(fileIdBytes, 5);
+    buf.set(new Uint8Array(data), CHUNK_HEADER_SIZE);
+    conn.send(buf.buffer);   // ArrayBuffer — safe with all PeerJS 1.4.x versions
 }
 
 function decodeRawMessage(rawData) {
@@ -238,6 +240,7 @@ function initPeer(customCode = null) {
         stale.removeAllListeners();
         stale.destroy();
     }
+    clearSignalingTimer();
     updateStatus('connecting', 'Signaling…');
     my4DigitCode = customCode || generate4DigitCode();
 
@@ -250,21 +253,17 @@ function initPeer(customCode = null) {
         }
     });
 
-    // Hard timeout on signaling connection.
-    // If the server hangs without emitting any error (OS-level TCP timeout,
-    // not a JS-level PeerJS error), the user would wait forever at "Signaling…".
-    // This gives them a clear message and retries after 10 s.
-    if (signalingTimer) clearTimeout(signalingTimer);
     signalingTimer = setTimeout(() => {
         signalingTimer = null;
         if (peer && !peer.open) {
-            showToast('Signaling server not responding — check your connection and retrying…', 'error');
-            initPeer(my4DigitCode); // retry with same code
+            showToast('Signaling server not responding — retrying…', 'error');
+            initPeer(my4DigitCode);
         }
-    }, 10000);
+    }, SIGNALING_TIMEOUT_MS);
 
     peer.on('open', () => {
-        if (signalingTimer) { clearTimeout(signalingTimer); signalingTimer = null; }
+        clearSignalingTimer();
+        peerRetryCount = 0;
         $myRoomCode.textContent = my4DigitCode;
         updateStatus('disconnected', 'Ready for peer');
         generateQRCode();
@@ -279,6 +278,7 @@ function initPeer(customCode = null) {
     });
 
     peer.on('error', (err) => {
+        clearSignalingTimer();
         console.error('[PeerJS]', err.type, err);
         if (err.type === 'unavailable-id') {
             if (peerRetryCount >= MAX_PEER_RETRIES) {
@@ -306,11 +306,8 @@ function initPeer(customCode = null) {
             showToast('Signaling server error — retrying…', 'error');
             setTimeout(() => initPeer(), 3000);
         } else if (err.type === 'socket-error' || err.type === 'socket-closed') {
-            // WebSocket to signaling server dropped or was refused.
-            // These were previously unhandled, leaving the UI stuck at "Signaling…"
-            // with no feedback and no retry. Treat the same as a server error.
             showToast('Connection to signaling server lost — retrying…', 'error');
-            setTimeout(() => initPeer(), 3000);
+            setTimeout(() => initPeer(my4DigitCode), 3000);
         }
     });
 
@@ -402,6 +399,12 @@ async function resumePendingTransfers(ids) {
 function showRetryOverlay()  { $retryOverlay && $retryOverlay.classList.add('visible'); }
 function hideRetryOverlay()  { $retryOverlay && $retryOverlay.classList.remove('visible'); }
 function clearConnTimeout()  { if (connectionTimeout) { clearTimeout(connectionTimeout); connectionTimeout = null; } }
+function clearSignalingTimer() {
+    if (signalingTimer) {
+        clearTimeout(signalingTimer);
+        signalingTimer = null;
+    }
+}
 
 function updateStatus(state, text) {
     $statusText.textContent = text;
@@ -714,18 +717,8 @@ async function sendFileOverWebRTC(file, resumeFrom = 0, existingFileId = null) {
 
     // ── Per-transfer one-time setup ─────────────────────────────────────────
     // Encode the fileId once — it never changes across chunks, so encoding it
-    // inside sendChunk would repeat the work totalChunks times (up to 4096×
-    // for a 1 GB file).
+    // inside sendChunk would repeat the work totalChunks times.
     const fileIdBytes = _enc.encode(fileId.padEnd(FILEID_LEN, '\0'));
-
-    // Pre-allocate a single reusable send buffer (header + max payload).
-    // This eliminates the ~260 KB allocation + GC that the old sendChunk created
-    // on every iteration.  RTCDataChannel.send() copies the view synchronously,
-    // so the buffer is free to overwrite on the very next iteration.
-    const sendBuf  = new Uint8Array(CHUNK_HEADER_SIZE + CHUNK_SIZE);
-    const sendView = new DataView(sendBuf.buffer);
-    sendBuf[0] = CHUNK_TAG;          // constant for the lifetime of this transfer
-    sendBuf.set(fileIdBytes, 5);     // constant for the lifetime of this transfer
 
     // Event-driven backpressure — safely access the underlying RTCDataChannel.
     // PeerJS doesn't guarantee a stable .dataChannel property, so we try several paths.
@@ -780,9 +773,7 @@ async function sendFileOverWebRTC(file, resumeFrom = 0, existingFileId = null) {
         if (dc && dc.bufferedAmount > BACKPRESSURE_HIGH) await waitForDrain();
 
         try {
-            // sendChunk writes into the pre-allocated sendBuf (header already
-            // set), then sends a subarray view — no per-chunk allocation.
-            sendChunk(chunkIndex, buffer, sendBuf, sendView);
+            sendChunk(chunkIndex, buffer, fileIdBytes);
         } catch (_) {
             showToast('Transfer interrupted — will resume on reconnect.', 'error');
             finishOutgoingFileCard(fileId, '?', 0);
@@ -816,11 +807,32 @@ async function sendFileOverWebRTC(file, resumeFrom = 0, existingFileId = null) {
     // Clean up listener — prevents accumulation over multiple files
     if (dc && drainListener) dc.removeEventListener('bufferedamountlow', drainListener);
 
-    delete pendingTransfers[fileId];
-    sendCtrl({ type: 'file-end', fileId });
+    try {
+        sendCtrl({ type: 'file-end', fileId });
+    } catch (_) {
+        showToast('Transfer interrupted before finalizing — will resume on reconnect.', 'error');
+        finishOutgoingFileCard(fileId, '?', 0);
+        return;
+    }
 
-    // Hash the File directly (File extends Blob — no copy needed)
-    computeFileHash(file).then(hash => sendCtrl({ type: 'file-hash', fileId, hash }));
+    // Hash the File directly (File extends Blob — no copy needed). Keep the
+    // pending transfer alive until the receiver gets this final message; if the
+    // connection drops here, reconnect can resend the missing footer/hash.
+    let hash = null;
+    try {
+        hash = await computeFileHash(file);
+    } catch (_) {
+        hash = null;
+    }
+
+    try {
+        sendCtrl({ type: 'file-hash', fileId, hash });
+        delete pendingTransfers[fileId];
+    } catch (_) {
+        showToast('Transfer interrupted before verification — will resume on reconnect.', 'error');
+        finishOutgoingFileCard(fileId, '?', 0);
+        return;
+    }
 
     const elapsed = (performance.now() - startTime) / 1000;
     const avgSpeed = elapsed > 0 ? file.size / elapsed : 0;
@@ -1359,6 +1371,11 @@ function generateQRCode() {
     box.innerHTML = '';
     const url = `${location.origin}${location.pathname}#join=${my4DigitCode}`;
     id('shareUrlText').textContent = url;
+    if (typeof QRCode === 'undefined') {
+        box.textContent = my4DigitCode;
+        showToast('QR library failed to load — use the code or copy link.', 'warning');
+        return;
+    }
     new QRCode(box, { text: url, width: 180, height: 180,
         colorDark: '#020617', colorLight: '#ffffff',
         correctLevel: QRCode.CorrectLevel.M });
